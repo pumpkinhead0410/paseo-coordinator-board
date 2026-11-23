@@ -106,10 +106,10 @@ test.skipIf(!root)("손상된 상태 파일이면 Selector가 defer로 보류하
   expect(readFileSync(statePath, "utf8")).toBe("{not json");
 });
 
-test.skipIf(!root)("실제 Selector와 Router를 이으면 모든 등급이 배정되고, 미리보기한 경로는 그대로 확정되며, AGY만 남아도 권한 모드 auto로 배정된다", async () => {
+test.skipIf(!root)("실제 Selector와 Router를 이으면 모든 등급이 배정되고, 미리보기한 경로는 그대로 확정되며, AGY만 남으면 작업자는 권한 모드 auto로 배정되고 코디네이터(M)는 보류된다", async () => {
   const { host, dir } = sandbox();
   const profiles = (JSON.parse(readFileSync(join(dir, "agent-profiles.json"), "utf8")) as { agentProfiles: { provider: string; model: string; thinkingOptionId: string }[] }).agentProfiles;
-  const modes: Record<string, { id: string; label: string }> = { claude: { id: "auto", label: "Auto" }, codex: { id: "auto-review", label: "Auto-review" }, antigravity: { id: "auto", label: "Auto" } };
+  const modes: Record<string, { id: string; label: string }> = { claude: { id: "auto", label: "Auto" }, codex: { id: "auto-review", label: "Auto-review" }, }; // AGY는 코디네이터 모드가 없습니다(보드 도구가 AGY CLI 도구 예산에서 빠지므로).
   const catalog: CatalogModel[] = [];
   for (const p of profiles) {
     const entry = catalog.find(m => m.provider === p.provider && m.model === p.model)
@@ -129,7 +129,8 @@ test.skipIf(!root)("실제 Selector와 Router를 이으면 모든 등급이 배�
   }
   const agy = { ...scope, excludedProviders: ["claude", "codex"] };
   const only = await router.plan(grades, { scope: agy, catalog }, "none");
-  for (const grade of grades) {
+  expect(only.decisions.M).toMatchObject({ kind: "held", hold: { code: "board-filtered" } });
+  for (const grade of ["A", "B", "C", "D"] as const) {
     const decision = only.decisions[grade];
     if (decision.kind !== "ready") throw new Error(`${grade}: ${JSON.stringify(decision)}`);
     expect(decision.route.provider).toBe("antigravity");

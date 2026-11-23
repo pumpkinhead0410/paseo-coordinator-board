@@ -215,3 +215,9 @@ type HoldCode =
 10. **문구 변경**: 편집기의 "추천으로 복원"을 "Selector로 복원"으로, 추천 표시를 "로컬 Selector 배정"으로 바꾸고 `route-options.ts` 안내에 Antigravity를 추가했습니다.
 11. **문서**: 구현자는 `README.md`·`OVERVIEW.md`를 범위 밖으로 두었고, 조정자가 리뷰 전에 두 문서의 "사용량 기반 자동 배정" 설명을 로컬 Selector 배정 설명으로 갱신했습니다.
 12. **독립 리뷰 반영**(`/tmp/arena-cb/review.md`, 리뷰어 antigravity/gemini-4-neon high, 판정 통합 허락): minor #1 `setupCoordinator`의 `plan-changed`를 사람용 새로 고침 안내로 변환, #2 화면 재조회 플래그 초기화 순서 수정, #3 `confirm` 보류 사유를 기대 경로 자신의 보드 사유로 한정, #4 이 절 정정, #5 `finish-query` 잠금 경합 1회 재시도, nit #6 M 코디네이터 모드 검사를 실행기 자격 검사보다 먼저 수행. nit #7·#8(갱신 중 표시, 계약 시험 조합 보강)은 후속 과제로 남깁니다.
+13. **결정 5 철회 — AGY 코디네이터 제외**(2026-11-23, 사용자 지시 "A를 먼저 시도하고 실패하면 B"에 따름)
+    - **관찰**: AGY `gemini-4-neon` 코디네이터에서 보드 도구 6개 중 `read_board_conversation`만 동작했습니다. `plan_board_assignment`를 부르자 AGY CLI가 `tool ... is not enabled for server paseo`로 거부했고, Paseo 기본 도구 `list_agents`도 같은 오류로 거부됐습니다.
+    - **원인**: AGY CLI는 세션당 도구 선언 예산 안에서 정의가 작은 MCP 도구부터 켭니다. Paseo가 주입한 90개 중 45개(192~551B)만 켜지고, 578B 이상은 lazy 목록에도 오르지 않았습니다. Paseo 도구 정책·플러그인 부착·AGY 사용자 MCP 설정은 원인이 아니었습니다.
+    - **시도 A**: `agents.providers.antigravity.paseoTools.disabledTools`에 44개를 넣어 46개로 줄였습니다. 33개(최대 993B, 합계 15,051B)만 켜져서 개수 상한이 아니라 크기 예산임을 확인했습니다. 그래도 `assign_board_worker`(1,525B)·`classify_board_conversation`(1,627B)·`review_board_records`(1,004B)는 꺼진 채였습니다. 설정은 원복했습니다.
+    - **조치 B**: `coordinatorModes`에서 `antigravity`를 빼서 M 후보와 코디네이터 생성에서 AGY를 제외하고, `verifyCoordinatorRuntime`과 `route-options.ts` 안내 문구의 AGY 추가분을 되돌렸습니다. 작업자(A~D)의 AGY 배정과 권한 모드 `auto`는 유지합니다.
+    - **남은 위험 [미확인]**: AGY 작업자에 붙는 `report_to_board`도 같은 예산에서 빠질 수 있습니다.
