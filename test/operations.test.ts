@@ -14,6 +14,8 @@ import type { DispatchInput } from "../shared/dispatch";
 import { setUsageRouting } from "../shared/usage-routing";
 import { createOperations } from "../server/operations";
 import { PreferenceStore } from "../server/preferences";
+import { legacyRouter } from "./legacy-router";
+import type { Router } from "../server/routes";
 
 const paths: string[] = [];
 afterEach(() => { for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -33,7 +35,7 @@ type Callback = (input: unknown, ctx: { paseo: unknown }) => Promise<unknown>;
 const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
 
 // This fixture has no host registry, networking, transcripts, or model executor.
-function scenario(facts?: Parameters<typeof createOperations>[2]) {
+function scenario(facts?: Parameters<typeof createOperations>[2], router: Parameters<typeof createOperations>[3] = legacyRouter()) {
   const dir = mkdtempSync(join(tmpdir(), "board-coordinator-operations-"));
   paths.push(dir);
   const store = new PreferenceStore(join(dir, "scope.json"));
@@ -94,7 +96,7 @@ function scenario(facts?: Parameters<typeof createOperations>[2]) {
       },
     },
   };
-  const ops = createOperations(store, join(dir, "workspace"), facts);
+  const ops = createOperations(store, join(dir, "workspace"), facts, router);
   const handlers = new Map<string, Callback>();
   ops.register({ handle: (contract: Rpc, handler: Callback) => { handlers.set(contract.name,handler); } } as unknown as PluginServerContext);
   async function call(definition: Rpc, input: unknown, sdk: unknown = paseo) {
@@ -124,16 +126,18 @@ test("initial setup requests only the diagnostics needed for its coordinator pre
   expect(calls).toEqual({ labels: 0, usage: 0 });
   expect(preview.usage).toBeUndefined();
   expect(preview.coordinatorMode?.id).toBe("auto-review");
+  expect(Object.keys(preview.routes.decisions)).toEqual(["M"]);
 
+  // 배정 판단은 로컬 Selector가 하므로 시작 화면은 계정 사용량을 조회하지 않는다.
   s.store.change(scope => { scope.usageRouting = true; });
   await s.call(operationState, { view: "setup" }, sdk);
-  expect(calls).toEqual({ labels: 0, usage: 1 });
   s.store.change(scope => { scope.routing.M = [route]; });
   await s.call(operationState, { view: "setup" }, sdk);
-  expect(calls).toEqual({ labels: 0, usage: 1 });
+  expect(calls).toEqual({ labels: 0, usage: 0 });
 
   const settings = await s.call(operationState, {}, sdk);
-  expect(calls).toEqual({ labels: 1, usage: 2 });
+  expect(calls).toEqual({ labels: 1, usage: 1 });
+  expect(Object.keys(settings.routes.decisions).sort()).toEqual(["A", "B", "C", "D", "M"]);
   expect(settings.usage).toBeDefined();
   expect(settings.providers.find((p: { id: string }) => p.id === "custom-agent")?.label).toBe("My Code Studio");
 });
@@ -308,7 +312,7 @@ test("a saved C-grade route reaches the actual worker, the local coordinator is 
   expect(selected).toEqual(alternate);
   const withHooks = await s.tool("plan_board_assignment",{needsHooks:true});
   expect(withHooks.routes.find(r => r.grade === "C").route).toBeNull();
-  await expect(s.tool("assign_board_worker",{job})).rejects.toThrow(/미리보기/);
+  await expect(s.tool("assign_board_worker",{job})).rejects.toThrow(/plan_board_assignment/);
   const input = {job:{...job, expectedRoute:selected}};
   const receipt = await s.tool("assign_board_worker",input);
   expect(await s.tool("assign_board_worker",input)).toEqual(receipt);
@@ -360,7 +364,7 @@ test("catalog discovers new provider IDs, useful names and unavailable, empty an
   expect(plan.routes.find(r => r.grade === "C").route).toEqual(choice);
   const created = await s.tool("assign_board_worker",{job:{...job,expectedRoute:choice}});
   expect(s.sessions.get(created.sessionId)?.config.provider).toBe("custom-agent/custom/v1");
-  await expect(s.call(updateRouting,{grade:"A",candidates:[choice],expectedRevision:1})).rejects.toThrow(/등급/);
+  await expect(s.call(updateRouting,{grade:"M",candidates:[choice],expectedRevision:1})).rejects.toThrow(/등급/);
 });
 
 test("worker previews and dispatch share the same high-grade fallback, including Grok-only hosts and fresh changes", async () => {
@@ -373,13 +377,10 @@ test("worker previews and dispatch share the same high-grade fallback, including
     for (const {grade, route:selected} of plan.routes) {
       expect(selected?.provider).toBe(provider);
       const input = {...job, grade, expectedRoute:selected, requestKey:"fallback-job-" + grade};
-      await expect(s.tool("assign_board_worker", {job:{...input, needsHooks:true}})).rejects.toThrow(/미리보기/);
+      await expect(s.tool("assign_board_worker", {job:{...input, needsHooks:true}})).rejects.toThrow(/plan_board_assignment/);
       const created = await s.tool("assign_board_worker", {job:input});
       expect(s.sessions.get(created.sessionId)?.config.provider).toBe(provider + "/" + selected.model);
     }
-    s.activity.providers.push("codex");
-    const old = plan.routes.find(r => r.grade === "A").route;
-    await expect(s.tool("assign_board_worker", {job:{...job, grade:"A", expectedRoute:old}})).rejects.toThrow(/미리보기/);
   }
 });
 
@@ -396,8 +397,8 @@ test("excluding a provider preserves ordered overrides across reloads, and gates
   expect(s.store.read().excludedProviders).toEqual(["codex"]);
   const plan = await s.tool("plan_board_assignment",{});
   expect(plan.routes.find(r=>r.grade==="C").route).toEqual(alternate);
-  await expect(s.tool("assign_board_worker",{job})).rejects.toThrow(/미리보기/);
-  await expect(s.call(setupCoordinator,{replace:true,expectedCoordinator:coordinator,expectedRoute:route})).rejects.toThrow(/코디네이터 모델/);
+  await expect(s.tool("assign_board_worker",{job})).rejects.toThrow(/plan_board_assignment/);
+  await expect(s.call(setupCoordinator,{replace:true,expectedCoordinator:coordinator,expectedRoute:route})).rejects.toThrow(/권한 모드/);
   const current = await s.tool("assign_board_worker",{job:{...job,expectedRoute:alternate}});
   await s.call(setProviderInclusion,{provider:"cursor",included:false,expectedRevision:2});
   expect((await s.tool("plan_board_assignment",{})).routes.find(r=>r.grade==="C").route).toBeNull();
@@ -451,8 +452,8 @@ test("새 코디네이터는 지원되는 자동 심사 모드를 미리 보여 
   expect(s.sessions.size).toBe(0);
 });
 
-test("OpenCode and Copilot need their actual safe coordinator mode and a tool-capable snapshot before replacing anyone", async () => {
-  for (const [provider, modeId] of [["opencode", "build"], ["copilot", "https://agentclientprotocol.com/protocol/session-modes#agent"]]) {
+test("OpenCode, Copilot and Antigravity need their actual safe coordinator mode and a tool-capable snapshot before replacing anyone", async () => {
+  for (const [provider, modeId] of [["opencode", "build"], ["copilot", "https://agentclientprotocol.com/protocol/session-modes#agent"], ["antigravity", "auto"]]) {
     const s = scenario();
     s.activity.providers = [provider];
     s.activity.modes = [{id:"allow-all",label:"Unrestricted"}, {id:"full-access",label:"Unrestricted"}];
@@ -542,20 +543,26 @@ test("only a digest click with enabled factual handling binds the exact coordina
   expect(s.sent[3].text).toContain("answer_board_fact");
 });
 
-test("usage-aware worker plans and dispatch agree, recheck capacity before creation and honor the saved toggle",async()=>{
-  const s=scenario();
-  s.activity.quotas={codex:10,cursor:70};
-  const preview=async()=> (await s.tool("plan_board_assignment",{})).routes.find(r=>r.grade==="C").route;
-  expect((await s.call(operationState,{})).usage).toHaveLength(2);
-  expect(await preview()).toEqual(alternate);
-  s.activity.quotas={codex:90,cursor:20};
-  await expect(s.tool("assign_board_worker",{job:{...job,expectedRoute:alternate}})).rejects.toThrow(/미리보기/);
+test("로컬 Router의 결정이 설정 미리보기·코디네이터 도구·배정에 그대로 쓰이고 보류는 사유와 함께 전달된다", async () => {
+  const held = { kind: "held", source: "selector", hold: { code: "all-exhausted", earliestResetAt: "2026-11-25T02:33:00Z" } } as const;
+  const ready = { kind: "ready", source: "selector", route, modeId: "auto-review", profileId: "work.codex.sol.high", why: "test" } as const;
+  const router: Router = {
+    plan: async grades => ({ decisions: Object.fromEntries(grades.map(g => [g, g === "A" ? held : ready])) as never, refreshing: true }),
+    confirm: async grade => grade === "A" ? held : ready,
+  };
+  const s = scenario(undefined, router);
+  const state = await s.call(operationState, {});
+  expect(state.routes.refreshing).toBe(true);
+  expect(state.routes.decisions.A).toEqual(held);
+  expect(state.coordinatorMode?.id).toBe("auto-review");
+  const plan = await s.tool("plan_board_assignment", {});
+  expect(plan.routes.find((r: { grade: string }) => r.grade === "A")).toMatchObject({ route: null, expectedModeId: null, hold: { code: "all-exhausted", earliestResetAt: "2026-11-25T02:33:00Z" } });
+  expect(plan.routes.find((r: { grade: string }) => r.grade === "A").hold.message).toMatch(/소진/);
+  expect(plan.routes.find((r: { grade: string }) => r.grade === "C")).toMatchObject({ route, expectedModeId: "auto-review" });
+  await expect(s.tool("assign_board_worker", { job: { ...job, grade: "A" } })).rejects.toThrow(/소진/);
   expect(s.sessions.size).toBe(0);
-  s.activity.quotas={codex:10,cursor:70};
-  expect((await s.tool("assign_board_worker",{job:{...job,expectedRoute:alternate}})).route).toEqual(alternate);
-  const status=await s.call(operationState,{});
-  await s.call(setUsageRouting,{enabled:false,expectedRevision:status.revision});
-  expect((await s.call(operationState,{})).usageRouting).toBe(false);
-  await expect(s.call(setUsageRouting,{enabled:true,expectedRevision:status.revision})).rejects.toThrow();
-  expect(await preview()).toEqual(route);
+  expect((await s.tool("assign_board_worker", { job })).route).toEqual(route);
+  // 이전 버전과 호환되는 토글은 저장만 되고 배정에는 쓰이지 않는다.
+  await s.call(setUsageRouting, { enabled: false, expectedRevision: state.revision });
+  expect((await s.call(operationState, {})).usageRouting).toBe(false);
 });

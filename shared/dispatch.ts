@@ -14,6 +14,7 @@ export const workerModeProvider = identifier.refine(id => !["__proto__", "constr
 export function recommendedWorkerMode(provider: string): string | undefined {
   if (provider === "claude") return "auto";
   if (provider === "codex") return "auto-review";
+  if (provider === "antigravity") return "auto";
 }
 export function effectiveWorkerMode(provider: string, overrides?: Record<string, string | undefined>): string | undefined {
   return overrides && Object.hasOwn(overrides, provider) ? overrides[provider] : recommendedWorkerMode(provider);
@@ -57,12 +58,7 @@ export function eligibleProvider(grade: Grade, provider: string, needsHooks = fa
   if (grade === "M") {
     if (!catalog) return primary(provider);
     // Old catalogs omitted mode discovery for Claude Code and Codex.
-    const hasMode = (m: CatalogModel) => !!m.coordinatorMode || (m.coordinatorMode === undefined && primary(m.provider));
-    const hasPrimary = catalog.some(m => primary(m.provider) && hasMode(m));
-    return (!hasPrimary || primary(provider)) && catalog.some(m => m.provider === provider && hasMode(m));
-  }
-  if (grade === "A" || grade === "B") {
-    return primary(provider) || (!!catalog && !catalog.some(m => primary(m.provider)));
+    return catalog.some(m => m.provider === provider && (!!m.coordinatorMode || (m.coordinatorMode === undefined && primary(m.provider))));
   }
   if (grade === "C" && provider === "grok") {
     return !!catalog && !catalog.some(m => m.provider !== "grok");

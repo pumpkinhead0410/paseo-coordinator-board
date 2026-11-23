@@ -3,12 +3,12 @@ import { Text, TextInput, View } from "react-native";
 import { useState } from "react";
 import {
   workerGradeSchema,
-  resolveRoute,
   sameRoute,
   type Grade,
   type RouteChoice,
 } from "../shared/dispatch";
 import type { Operations } from "../shared/operations";
+import { holdText, readyRoute } from "../shared/route-decision";
 import { Button, type Theme } from "./controls";
 import { browseModels, explainEmptyRoute, koreanText, savedCandidateIssue } from "./route-options";
 
@@ -63,7 +63,8 @@ function CandidateList({ data, theme, busy, grade, save }: Props & { grade: Grad
   const [provider, setProvider] = useState<string | null>(null);
   const [edit, setSelection] = useState<RouteChoice | null>(null);
   const color = theme.colors.foreground;
-  const route = resolveRoute(grade, data.routing, data.catalog, false, data.usageRouting ? data.usage : undefined);
+  const decision = data.routes.decisions[grade];
+  const route = readyRoute(decision);
   const saved = data.routing[grade]?.length;
   const browser = browseModels(data, grade, provider, query, limit, t, route);
   const editAvailable = edit && data.catalog.some(m => m.provider === edit.provider && m.model === edit.model &&
@@ -77,8 +78,9 @@ function CandidateList({ data, theme, busy, grade, save }: Props & { grade: Grad
   }
   return (
     <View style={{ gap: 7 }}>
-      <Text style={{ color }}>{saved ? t("저장된 배정", "Saved route") : t("추천 설정", "Recommended route")} · {routeName(route, t)}</Text>
-      {!route && <Text style={{ color: theme.colors.foregroundMuted }}>{explainEmptyRoute(data, grade, t)}</Text>}
+      <Text style={{ color }}>{saved ? t("저장된 배정", "Saved route") : t("로컬 Selector 배정", "Local selector route")} · {routeName(route, t)}</Text>
+      {decision?.kind === "ready" && decision.why && <Text style={{ color: theme.colors.foregroundMuted }}>{t("Selector가 고른 이유", "Selector reason")} · {decision.why}</Text>}
+      {!route && <Text style={{ color: theme.colors.foregroundMuted }}>{decision?.kind === "held" && decision.source === "selector" ? holdText(decision.hold, t) : explainEmptyRoute(data, grade, t)}</Text>}
       {rows.map((r, i) => {
         const issue = savedCandidateIssue(data, grade, r, t);
         return (
@@ -132,7 +134,7 @@ function CandidateList({ data, theme, busy, grade, save }: Props & { grade: Grad
             key={JSON.stringify([m.provider, m.model])}
             theme={theme}
             label={m.provider + " / " + m.model + (route?.provider === m.provider && route.model === m.model
-              ? " · " + (saved ? t("적용 중", "In use") : t("추천", "Recommended")) : "")}
+              ? " · " + (saved ? t("적용 중", "In use") : t("Selector 선택", "Selector pick")) : "")}
             selected={selection?.provider === m.provider && selection.model === m.model}
             onPress={() => setSelection(route?.provider === m.provider && route.model === m.model
               ? route : { provider: m.provider, model: m.model, effort: null })}
@@ -176,7 +178,7 @@ function CandidateList({ data, theme, busy, grade, save }: Props & { grade: Grad
         />
         <Button
           theme={theme}
-          label={t("추천으로 복원", "Restore defaults")}
+          label={t("Selector로 복원", "Restore selector routing")}
           disabled={busy || !data.routing[grade]}
           onPress={() => void save(grade, [], data.revision)}
         />

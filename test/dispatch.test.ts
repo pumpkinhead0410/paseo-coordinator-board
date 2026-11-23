@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { createPaseoApi } from "@getpaseo/client";
-import { dispatchWorker, readCatalog, readManagedWorkspaces } from "../server/dispatch";
-import { resolveRoute, validateCandidates, type CatalogModel, type DispatchInput, type RouteChoice } from "../shared/dispatch";
+import { dispatchWorker as dispatchWithRouter, readCatalog, readManagedWorkspaces } from "../server/dispatch";
+import { legacyRouter } from "./legacy-router";
+import { effectiveWorkerMode, resolveRoute, validateCandidates, type CatalogModel, type DispatchInput, type RouteChoice } from "../shared/dispatch";
 
+// 호스트 Selector 대신 업스트림 추천표로 판정하는 가짜 Router를 주입한다.
+const dispatchWorker: typeof dispatchWithRouter = (paseo, request, scope) => dispatchWithRouter(paseo, request, scope, legacyRouter());
 const gemini: RouteChoice = { provider: "cursor", model: "gemini-4-neon-high", effort: null };
 const sol: RouteChoice = { provider: "codex", model: "gpt-6.2-sol", effort: "high" };
 const models: CatalogModel[] = [
@@ -18,7 +21,8 @@ test("개인 배정표의 우선·예비·필수 훅을 같은 순서로 판정�
   assert.deepEqual(resolveRoute("C", policy, models.slice(1)), sol);
   assert.equal(resolveRoute("C", { C: [gemini] }, models.slice(1)), null);
   assert.equal(resolveRoute("M", {}, [models[0]]), null);
-  for (const grade of ["A", "B", "M"] as const) assert.throws(() => validateCandidates(grade, [gemini], models), /등급/);
+  assert.throws(() => validateCandidates("M", [gemini], models), /등급/);
+  for (const grade of ["A", "B"] as const) validateCandidates(grade, [gemini], models);
   assert.throws(() => validateCandidates("C", [gemini, gemini], models), /두 번/);
   assert.throws(() => validateCandidates("C", [{ ...gemini, effort: "high" }], models), /추론 강도/);
   assert.deepEqual(resolveRoute("M", {}, models), sol);
@@ -40,7 +44,7 @@ test("Claude-only and Codex-only hosts keep their own live models at every grade
   assert.deepEqual(resolveRoute("B", {}, [models[0], astra, opus]), {provider:"claude", model:opus.model, effort:"xhigh"});
 });
 
-test("only the remaining worker pool can cover otherwise empty grades, preserving hooks, saved routes and full-host priorities", () => {
+test("worker-only hosts cover every grade except the coordinator, and saved A·B routes may use any provider while hooks stay native-only", () => {
   const grok = {...models[0], provider:"grok", model:"grok-latest"};
   const custom = {...models[0], provider:"claude-looking-alias", model:"vendor/model"};
   for (const worker of [models[0], grok, custom]) {
@@ -54,14 +58,20 @@ test("only the remaining worker pool can cover otherwise empty grades, preservin
     assert.equal(resolveRoute("M", {}, [worker]), null);
     const mixed = [worker, models[1]];
     for (const grade of ["A", "B"] as const) {
-      assert.equal(resolveRoute(grade, {}, mixed)?.provider, "codex");
-      assert.throws(() => validateCandidates(grade, [choice], mixed), /등급/);
-      // Keep a person's saved fallback for when the host returns to a single provider.
+      // A·B는 더 이상 claude·codex로 제한하지 않는다. 저장 순서에서 어느 실행기든 고를 수 있다.
+      validateCandidates(grade, [choice], mixed);
       validateCandidates(grade, [choice, sol], mixed, [choice]);
-      assert.deepEqual(resolveRoute(grade, {[grade]:[choice, sol]}, mixed), sol);
+      assert.deepEqual(resolveRoute(grade, {[grade]:[choice, sol]}, mixed), choice);
     }
   }
   assert.equal(resolveRoute("C", {}, [grok, custom])?.provider, custom.provider);
+});
+
+test("AGY 작업자는 provider 기본값(full-access)이 아니라 auto로 만들고, 사용자 재정의가 우선한다", () => {
+  assert.equal(effectiveWorkerMode("antigravity"), "auto");
+  assert.equal(effectiveWorkerMode("antigravity", { antigravity: "default" }), "default");
+  assert.equal(effectiveWorkerMode("claude"), "auto");
+  assert.equal(effectiveWorkerMode("codex"), "auto-review");
 });
 
 type DaemonClient = Parameters<typeof createPaseoApi>[0];
@@ -143,7 +153,7 @@ test("정책·관리 범위가 달라지거나 다른 워크스페이스면 생�
   await assert.rejects(dispatchWorker(sdk, task, () => other), /관리할 프로젝트/);
   await assert.rejects(dispatchWorker(sdk, { ...task, workspaceId: "foreign" }, () => state), /워크스페이스/);
   await assert.rejects(dispatchWorker(sdk, { ...task, projectId: "other" }, () => other), /워크스페이스/);
-  await assert.rejects(dispatchWorker(sdk, { ...task, needsHooks: true }, () => state), /미리보기/);
+  await assert.rejects(dispatchWorker(sdk, { ...task, needsHooks: true }, () => state), /plan_board_assignment/);
   let reads = 0;
   await assert.rejects(dispatchWorker(sdk, task, () => ++reads === 1 ? state : other), /관리할 프로젝트/);
   assert.equal(reqs.length, 0);

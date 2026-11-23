@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Text, View } from "react-native";
 import type { ProviderEntry } from "../shared/dispatch";
 import { hasUsageReading, recentUsage, type AccountUsage } from "../shared/usage-routing";
-import { Button, type Theme } from "./controls";
+import type { Theme } from "./controls";
 import { useBoardLanguage } from "./language";
 
 function AccountCard({label,report,supplemental,issue,theme}: {label:string;report?:AccountUsage;supplemental?:boolean;issue?:AccountUsage["issue"];theme:Theme}) {
@@ -49,8 +49,8 @@ function AccountCard({label,report,supplemental,issue,theme}: {label:string;repo
   </View>;
 }
 
-export function UsageRouting({providers,reports,supplemental=[],enabled,busy,onToggle,theme}:{
-  providers:ProviderEntry[]; reports:AccountUsage[]; supplemental?:AccountUsage[]; enabled:boolean; busy:boolean; onToggle:()=>void; theme:Theme;
+export function UsageRouting({providers,reports,supplemental=[],theme}:{
+  providers:ProviderEntry[]; reports:AccountUsage[]; supplemental?:AccountUsage[]; theme:Theme;
 }) {
   const {t} = useBoardLanguage();
   const c = theme.colors;
@@ -73,11 +73,6 @@ export function UsageRouting({providers,reports,supplemental=[],enabled,busy,onT
       </View>)}
     </View>
     {!cards.length && <Text style={{color:c.foregroundMuted}}>{t("호스트에 사용량 보고서가 없습니다.","This host has no usage reports.")}</Text>}
-    <View style={{alignItems:"flex-start"}}>
-      <Button theme={theme} selected={enabled} disabled={busy}
-        label={enabled ? t("사용량 기반 자동 배정 켜짐","Usage-aware routing on") : t("사용량 기반 자동 배정 꺼짐","Usage-aware routing off")}
-        onPress={onToggle}/>
-    </View>
-    <Text style={{fontSize:12,color:c.foregroundMuted}}>{t("자동 배정은 같은 등급에서 공통 한도가 있는 계정의 가장 낮은 잔여율을 비교합니다. 직접 저장한 배정 순서가 우선입니다.","Automatic routing compares the lowest fresh headroom for candidates with a shared quota window. Saved route priorities take precedence.")}</Text>
+    <Text style={{fontSize:12,color:c.foregroundMuted}}>{t("모델 배정은 이 호스트의 로컬 Selector 정책을 따릅니다. 직접 저장한 배정 순서가 우선합니다.","Model routing follows this host's local selector policy. Saved route priorities take precedence.")}</Text>
   </View>;
 }

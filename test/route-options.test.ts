@@ -29,7 +29,8 @@ test("검색하기 전에도 실행기마다 첫 모델이 보이며, 실행기�
   expect(browseModels(data, "C", null, "커서", 6).choices.map(m => m.model)).toEqual(["gemini"]);
   expect(browseModels(data, "C", "cursor", "special", 6).hint).toContain("전체 실행기");
   expect(browseModels(data, "C", null, "no match", 6).hint).toContain("검색어");
-  expect(browseModels(data, "B", null, "", 6).providers.map(p => p.id)).toEqual(["codex"]);
+  // A·B도 이제 모든 실행기를 고를 수 있다(로컬 Selector가 풀을 고른다).
+  expect(browseModels(data, "B", null, "", 6).providers.map(p => p.id)).toEqual(["codex", "cursor", "custom-cli"]);
 });
 
 test("실행기 포함 여부·등급·연결 상태를 기준으로 빈 추천의 복구 방법을 표시한다", () => {
@@ -77,7 +78,7 @@ test("영어 경고를 표시하면서 실행기 이름과 모델 ID를 보존�
     catalog: [a, b], routing: { C: [row] },
   };
   expect(savedCandidateIssue(data, "C", row, en)).toMatch(/effort/);
-  expect(explainEmptyRoute(data, "C", en)).toContain("Restore defaults");
+  expect(explainEmptyRoute(data, "C", en)).toContain("Restore selector routing");
   expect(browseModels(data, "C", "cursor", "팀", 6, en).hint).toContain("All providers");
   const found = browseModels(data, "C", null, "팀", 6, en);
   expect(found.providers[0].label).toBe("팀 실행기");

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { accountUsage } from "./usage-routing";
 import { workImages } from "./work-images";
 export { WORK_IMAGE_MIME_TYPES, MAX_WORK_IMAGES, MAX_WORK_IMAGE_BYTES, MAX_WORK_IMAGES_BYTES, type WorkImage } from "./work-images";
+import { routePreviewSchema } from "./route-decision";
 import { catalogModelSchema, providerEntrySchema, workerModeProvider, gradeSchema, routeChoiceSchema, routePolicySchema } from "./dispatch";
 
 export const operationState = defineRpc({
@@ -15,6 +16,7 @@ export const operationState = defineRpc({
     usage: z.array(accountUsage).optional(), displayUsage: z.array(accountUsage).optional(), usageRouting: z.boolean().optional(),
     coordinatorMode: z.object({ id: z.string(), label: z.string() }).nullable(),
     routing: routePolicySchema,
+    routes: routePreviewSchema,
     revision: z.number().int().nonnegative(),
   }),
 });

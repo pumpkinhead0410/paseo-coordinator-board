@@ -18,7 +18,7 @@ function sameConfig(a: Pending["config"], b: Pending["config"]) {
 
 function verifyCoordinatorRuntime(agent: Agent, config: Pending["config"]) {
   const provider = config.provider.split("/", 1)[0];
-  if (provider === "opencode" || provider === "copilot") {
+  if (provider === "opencode" || provider === "copilot" || provider === "antigravity") {
     const capabilities = agent.capabilities;
     if (agent.provider !== provider || !config.modeId || config.modeId !== agent.currentModeId ||
         !capabilities?.supportsToolInvocations || !(capabilities.supportsMcpServers || capabilities.supportsNativePaseoTools) ||
