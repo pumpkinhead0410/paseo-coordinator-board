@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { reportingKey } from "../shared/contract";
 import {
-  dispatchInputSchema, includedCatalog, resolveRoute, sameRoute, effectiveWorkerMode,
-  type CatalogModel, type DispatchInput, type ProviderEntry, type RouteChoice, type RoutePolicy, type WorkspaceChoice,
+  dispatchInputSchema, type CatalogModel, type DispatchInput, type ProviderEntry, type RouteChoice, type RoutePolicy, type WorkspaceChoice,
 } from "../shared/dispatch";
-import { readAccountUsage } from "./usage-routing";
+import { holdText, koreanOnly } from "../shared/route-decision";
 import { readPages } from "./discovery";
+import { createRouter, routingFingerprint, type Router } from "./routes";
 
-export { resolveRoute, validateCandidates } from "../shared/dispatch";
+export { validateCandidates } from "../shared/dispatch";
 
 type Sdk = PluginHandlerContext["paseo"];
 type PaseoWorkspace = Awaited<ReturnType<Sdk["workspaces"]["list"]>>["entries"][number];
@@ -21,6 +21,7 @@ type Directory = { providers: Omit<ProviderEntry, "included">[]; catalog: Catalo
 const coordinatorModes = new Map<string, string[]>([
   ["claude", ["auto", "default"]],
   ["codex", ["auto-review", "auto"]],
+  ["antigravity", ["auto"]],
   ["copilot", ["https://agentclientprotocol.com/protocol/session-modes#agent"]],
   ["opencode", ["build"]],
 ]);
@@ -150,13 +151,13 @@ const fingerprintKey = "coordinator-board/dispatch-intent";
 const parentKey = "coordinator-board/dispatch-parent";
 const modeKey = "coordinator-board/dispatch-mode";
 
-export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | "providers">, request: DispatchInput, getScope: () => DispatchScope) {
+export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | "providers">, request: DispatchInput, getScope: () => DispatchScope, router: Router = createRouter()) {
   const input = dispatchInputSchema.parse(request);
   const scopeForProject = () => {
     const state = getScope();
     if (typeof state.coordinator !== "string" || !state.coordinator) throw new Error("현재 기기의 코디네이터를 먼저 지정해 주세요.");
     if (!state.projects.includes(input.projectId)) throw new Error("이 호스트에서 관리할 프로젝트를 먼저 선택해 주세요.");
-    return { workerModeOverrides: state.workerModeOverrides ?? {}, coordinator: state.coordinator, routing: state.routing, excluded: state.excludedProviders, usageRouting: state.usageRouting !== false };
+    return { workerModeOverrides: state.workerModeOverrides ?? {}, coordinator: state.coordinator, routing: state.routing, excluded: state.excludedProviders };
   };
   const initial = scopeForProject();
   const sessionId = creationUuid(input.requestKey, "agent");
@@ -185,24 +186,16 @@ export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | 
     // An agent snapshot alone does not confirm that its initial prompt was accepted.
     // Replay the original creation key/payload so the daemon settles that operation.
   } else {
-    const checkUsage = initial.usageRouting && !initial.routing[input.grade];
-    const provider = route.provider;
-    modeId = effectiveWorkerMode(provider, initial.workerModeOverrides);
-    const [catalog, usage] = await Promise.all([
-      readCatalog(paseo, target.workspaceDirectory),
-      checkUsage ? readAccountUsage(paseo) : [],
-      modeId ? requireWorkerMode(paseo, provider, modeId, target.workspaceDirectory) : undefined,
-    ]);
+    const routingScope = (state: typeof initial) => ({ routing: state.routing, excludedProviders: state.excluded, workerModeOverrides: state.workerModeOverrides });
+    const catalog = await readCatalog(paseo, target.workspaceDirectory);
+    // 확정된 경로가 지금도 배정 가능한지만 확인합니다. 다른 경로로 바꿔 배정하지 않습니다.
+    const decision = await router.confirm(input.grade, route, { scope: routingScope(initial), catalog, needsHooks: input.needsHooks });
+    if (decision.kind === "held") throw new Error(holdText(decision.hold, koreanOnly));
+    modeId = decision.modeId;
+    if (modeId) await requireWorkerMode(paseo, route.provider, modeId, target.workspaceDirectory);
     const state = scopeForProject();
-    if (modeId !== effectiveWorkerMode(provider, state.workerModeOverrides))
-      throw new Error("작업 권한 설정이 바뀌었습니다. 미리보기를 다시 확인해 주세요.");
-    if (checkUsage !== (state.usageRouting && !state.routing[input.grade])) {
+    if (routingFingerprint(routingScope(state), input.grade, route.provider) !== routingFingerprint(routingScope(initial), input.grade, route.provider))
       throw new Error("배정 설정이 바뀌었습니다. 미리보기를 다시 확인해 주세요.");
-    }
-    const selected = resolveRoute(input.grade, state.routing, includedCatalog(catalog, state.excluded), input.needsHooks, state.usageRouting ? usage : []);
-    if (!selected || !sameRoute(route, selected)) {
-      throw new Error("현재 배정 결과가 미리보기와 다릅니다. 호스트와 모델을 다시 확인해 주세요.");
-    }
     parent = state.coordinator;
   }
   if (input.expectedModeId !== undefined && input.expectedModeId !== modeId)

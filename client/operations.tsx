@@ -12,10 +12,9 @@ import {
   updateRouting,
   type Operations,
 } from "../shared/operations";
-import { resolveRoute } from "../shared/dispatch";
+import { holdText, readyRoute } from "../shared/route-decision";
 import { Button, SessionChip, type Theme } from "./controls";
 import { PhotoComposer, usePhotoDraft } from "./photo-composer";
-import { setUsageRouting } from "../shared/usage-routing";
 import { UsageRouting } from "./usage-routing";
 import { ProviderSettings } from "./providers";
 import { FactReplyControls } from "./fact-reply-controls";
@@ -39,7 +38,6 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
     setup = useRpc(setupCoordinator),
     includeProvider = useRpc(setProviderInclusion),
     saveWorkerMode = useRpc(setWorkerMode),
-    changeUsageRouting = useRpc(setUsageRouting),
     savePolicy = useRpc(updateRouting);
   const sendWork = useRpc(requestWork),
     sendDigest = useRpc(askDigest);
@@ -86,6 +84,14 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
     }
   }, []);
   const needsModels = settings || (configured && !coordinator);
+  // 사용량 갱신은 기다리지 않고 응답하므로, 갱신 중이면 한 번만 다시 조회합니다.
+  const followUp = useRef(false);
+  useEffect(() => {
+    if (followUp.current) { followUp.current = false; return; }
+    if (!data?.routes.refreshing) return;
+    const timer = setTimeout(() => { followUp.current = true; void refresh(false, !settings); }, 5000);
+    return () => clearTimeout(timer);
+  }, [data, settings, refresh]);
   useEffect(() => {
     live.current = true;
     return () => {
@@ -162,7 +168,9 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
     }
   }
   if (!settings && !configured && !coordinator) return null;
-  const model = data && resolveRoute("M", data.routing, data.catalog, false, data.usageRouting ? data.usage : undefined);
+  const decision = data?.routes.decisions.M;
+  const model = readyRoute(decision);
+  const missingModel = data && (decision?.kind === "held" && decision.source === "selector" ? holdText(decision.hold, t) : explainEmptyRoute(data, "M", t));
   const mode = data?.coordinatorMode;
   const modeText = mode ? t(`도구 권한 · ${mode.label}`, `Tool permissions · ${mode.label}`) : t("권한 모드를 확인할 수 없습니다. 설정에서 실행기·모델을 새로 고쳐 주세요.", "Permission mode unavailable. Refresh providers and models in Settings.");
   const color = theme.colors.foreground;
@@ -210,14 +218,10 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
       }} />}
       {feedbackArea === "provider" && feedback}
     </View>
-    {data && <UsageRouting theme={theme} providers={data.providers} reports={data.usage ?? []} supplemental={data.displayUsage} enabled={data.usageRouting ?? false} busy={busy || loading || !data.usage}
-      onToggle={() => void (async () => {
-        const result = await act(() => changeUsageRouting({enabled:!data.usageRouting,expectedRevision:data.revision}), t("사용량 기반 배정 설정을 저장했습니다.","Saved the usage routing preference."), "routing");
-        if (live.current) await refresh(!!result);
-      })()} />}
+    {data && <UsageRouting theme={theme} providers={data.providers} reports={data.usage ?? []} supplemental={data.displayUsage} />}
     <View style={section}>
       <Text accessibilityRole="header" style={heading}>{t("모델 배정", "Model routing")}</Text>
-      <Text style={{ color: muted }}>{t("추천 설정은 연결된 실행기에서 사용할 수 있는 모델을 고릅니다. 직접 정하려면 후보를 원하는 순서대로 저장하세요.", "Recommended settings use available models from connected providers. To customize a grade, save its models in order of preference.")}</Text>
+      <Text style={{ color: muted }}>{t("등급별 모델은 이 호스트의 로컬 Selector가 고릅니다. 직접 정하려면 후보를 원하는 순서대로 저장하세요. 저장한 순서가 Selector보다 우선합니다.", "The local selector on this host picks each grade's model. To customize a grade, save its models in order of preference. A saved order takes precedence over the selector.")}</Text>
       {data && <RouteEditor
         data={data}
         theme={theme}
@@ -238,7 +242,7 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
       <Text accessibilityRole="header" style={heading}>{t("운영 세션 교체", "Replace coordinator")}</Text>
       <Text style={{ color: muted }}>{t("새 코디네이터를 만들 때 쓸 모델", "Model for the next coordinator")} · {loading ? t("조회 중…", "Loading\u2026") : routeName(model, t)}</Text>
       {!loading && model && <Text style={{ color: muted }}>{modeText}</Text>}
-      {!loading && data && !model && <Text style={{ color: muted }}>{explainEmptyRoute(data, "M", t)}</Text>}
+      {!loading && data && !model && <Text style={{ color: muted }}>{missingModel}</Text>}
       {confirm && <Text style={{ color }}>{t("새 운영 세션이 준비되면 담당자를 바꿉니다. 진행 중인 작업과 결정 카드는 유지됩니다.", "The new session takes over when ready. Current work and decisions stay on the board.")}</Text>}
       <View style={wrap}>
         <Button theme={theme} label={confirm ? t("교체 취소", "Cancel replacement") : t("새 코디네이터로 교체…", "Replace coordinator\u2026")}
@@ -278,7 +282,7 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
     </> : <>
       <Text style={{ color: muted }}>{loading ? t("사용할 수 있는 모델을 확인하고 있습니다.", "Checking available models\u2026") :
         model ? t(`연결된 모델로 운영 세션을 만듭니다 · ${routeName(model, t)}`, `Create a coordinator session with ${routeName(model, t)}`) :
-        data ? explainEmptyRoute(data, "M", t) : t("설정에서 실행기와 모델을 새로 고쳐 주세요.", "Refresh providers and models in Settings.")}</Text>
+        data ? missingModel : t("설정에서 실행기와 모델을 새로 고쳐 주세요.", "Refresh providers and models in Settings.")}</Text>
       {!loading && model && <Text style={{ color: muted }}>{modeText}</Text>}
       <View style={wrap}><Button theme={theme} label={data?.routing.M ? t("저장한 모델로 시작", "Start with saved model") : t("추천 설정으로 시작", "Start with recommended settings")} disabled={busy || loading || !model || !mode} onPress={connect} /></View>
     </>}

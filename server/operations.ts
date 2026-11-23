@@ -9,7 +9,8 @@ import { SessionPhotoStore } from "./session-photos";
 import { createHash } from "node:crypto";
 import { askDigest, operationState, requestWork, setProviderInclusion, setWorkerMode, setupCoordinator, updateRouting } from "../shared/operations";
 import { coordinatorPinSettings, pinCurrentCoordinator, setCoordinatorAutoPin } from "../shared/operations";
-import { dispatchInputSchema, includedCatalog, sameRoute, workerGradeSchema, effectiveWorkerMode } from "../shared/dispatch";
+import { dispatchInputSchema, gradeSchema, includedCatalog, workerGradeSchema } from "../shared/dispatch";
+import { holdText, koreanOnly, readyRoute } from "../shared/route-decision";
 import {
   configForRoute,
   dispatchWorker,
@@ -18,9 +19,9 @@ import {
   requireWorkerMode,
   readProviderAvailability,
   readManagedWorkspaces,
-  resolveRoute,
   validateCandidates,
 } from "./dispatch";
+import { createRouter, routingFingerprint, type Router } from "./routes";
 import { CoordinatorLifecycle } from "./lifecycle";
 import { isCurrentMembership } from "./session-links";
 import { managedRowsForCoordinator } from "./coordinator";
@@ -28,7 +29,7 @@ import type { BoardFacts } from "./board-facts";
 import { sendCoordinatorRequest, digestPrompt, englishDigestPrompt, digestWithFactReplies } from "./digest";
 import { PreferenceStore } from "./preferences";
 
-export function createOperations(store: PreferenceStore, workspaceDir: string, facts?: Pick<BoardFacts, "prepareCycle" | "bindMessage">) {
+export function createOperations(store: PreferenceStore, workspaceDir: string, facts?: Pick<BoardFacts, "prepareCycle" | "bindMessage">, router: Router = createRouter()) {
   const sessionPhotos = new SessionPhotoStore(join(store.directory, "session-photos"));
   const lifecycle = new CoordinatorLifecycle(store, workspaceDir);
   function ownerScope(caller: string) {
@@ -49,15 +50,16 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
     });
     server.handle(operationState, async ({ view }, { paseo }) => {
       const settings = view !== "setup";
-      const initial = settings ? null : store.read();
-      const needUsage = !initial || (initial.usageRouting && !initial.routing.M);
       const [directory, usage] = await Promise.all([
         readProviderDirectory(paseo, undefined, settings, true),
-        needUsage ? readAccountUsage(paseo) : undefined,
+        // 계정별 잔여량 카드에만 쓰입니다. 배정 판단은 로컬 Selector가 합니다.
+        settings ? readAccountUsage(paseo) : undefined,
       ]);
-      const scope = initial ?? store.read();
+      const scope = store.read();
       const catalog = includedCatalog(directory.catalog, scope.excludedProviders);
-      const coordinator = resolveRoute("M", scope.routing, catalog, false, scope.usageRouting ? usage : []);
+      // 사용량 갱신 명령을 기다리지 않고 현재 상태로 응답합니다. Selector 실패도 보류로 표시할 뿐 예외로 만들지 않습니다.
+      const routes = await router.plan(settings ? gradeSchema.options : ["M"], { scope, catalog: directory.catalog }, "background");
+      const coordinator = readyRoute(routes.decisions.M);
       return {
         usage, usageRouting:scope.usageRouting,
         ...(settings && { workerModeOverrides: scope.workerModeOverrides,
@@ -65,7 +67,7 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
         }),
         providers: directory.providers.map(p => ({ ...p, included: !scope.excludedProviders.includes(p.id) })),
         catalog, coordinatorMode: catalog.find(m => m.provider === coordinator?.provider)?.coordinatorMode ?? null,
-        routing: scope.routing, revision: scope.routingRevision,
+        routing: scope.routing, routes, revision: scope.routingRevision,
       };
     });
     server.handle(setUsageRouting, input => {
@@ -120,11 +122,16 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
     });
     server.handle(setupCoordinator, async (input, { paseo }) => {
       const initial = store.read();
-      const checkUsage = initial.usageRouting && !initial.routing.M;
-      const [catalog,usage] = await Promise.all([readCatalog(paseo, undefined, true),checkUsage ? readAccountUsage(paseo) : []]);
+      const catalog = await readCatalog(paseo, undefined, true);
+      const decision = await router.confirm("M", input.expectedRoute, { scope: initial, catalog });
+      if (decision.kind === "held") {
+        // 사람에게 보이는 화면이므로 코디네이터 도구 이름 대신 새로 고침을 안내합니다.
+        if (decision.hold.code === "plan-changed") throw new Error("코디네이터 모델 또는 권한 모드가 바뀌었습니다. 설정을 새로 고쳐 주세요.");
+        throw new Error(holdText(decision.hold, koreanOnly));
+      }
+      const fingerprint = routingFingerprint(initial, "M");
       const verifyRoute = (scope: ReturnType<typeof store.read>) => {
-        const route = resolveRoute("M", scope.routing, includedCatalog(catalog, scope.excludedProviders), false, scope.usageRouting ? usage : []);
-        if (checkUsage !== (scope.usageRouting && !scope.routing.M) || !route || !sameRoute(route, input.expectedRoute))
+        if (routingFingerprint(scope, "M") !== fingerprint)
           throw new Error("코디네이터 모델 또는 권한 모드가 바뀌었습니다. 설정을 새로 고쳐 주세요.");
       };
       verifyRoute(store.read());
@@ -170,16 +177,15 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
   const plan = defineAgentTool({
     name: "plan_board_assignment",
     description:
-      "Find eligible model routes and the managed projects, active sessions, and workspaces on this host. Choose a grade for the task, then use the returned route. When Claude Code and Codex are unavailable, other connected workers can handle high grades. Set needsHooks when native hooks are required in both the plan and assignment. Ask for clarification if the project is ambiguous.",
+      "Find eligible model routes and the managed projects, active sessions, and workspaces on this host. Choose a grade for the task, then use the returned route. A grade with a hold has no route: do not assign it, tell the human the hold message, and when the code is plan-changed run this tool again. Set needsHooks when native hooks are required in both the plan and assignment. Ask for clarification if the project is ambiguous.",
     input: z.strictObject({ needsHooks: z.boolean().optional() }),
     async execute({ needsHooks }, { paseo, agent }) {
       const first = ownerScope(agent.id);
-      const [catalog, workspaces, rows, projectList, usage] = await Promise.all([
+      const [catalog, workspaces, rows, projectList] = await Promise.all([
         readCatalog(paseo),
         readManagedWorkspaces(paseo, first.projects),
         managedRowsForCoordinator(paseo, store, agent.id),
         paseo.projects.list(),
-        first.usageRouting ? readAccountUsage(paseo) : [],
       ]);
       const latest = ownerScope(agent.id);
       const selected = (id: string) => first.projects.includes(id) && latest.projects.includes(id);
@@ -200,11 +206,15 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
           workspaceTitle,
           status,
         }));
-      const allowed = includedCatalog(catalog, latest.excludedProviders);
+      // 여러 등급의 사용량 갱신을 한 번으로 모아 한 번만 기다립니다.
+      const { decisions } = await router.plan(workerGradeSchema.options, { scope: latest, catalog, needsHooks }, "await");
       const routes = workerGradeSchema.options.map(grade => {
-        const route = resolveRoute(grade, latest.routing, allowed, needsHooks, latest.usageRouting ? usage : []);
-        const expectedModeId = route ? effectiveWorkerMode(route.provider, latest.workerModeOverrides) : undefined;
-        return { grade, route, expectedModeId };
+        const decision = decisions[grade];
+        if (decision.kind === "held") {
+          const { code, earliestResetAt } = decision.hold;
+          return { grade, route: null, expectedModeId: null, hold: { code, message: holdText(decision.hold, koreanOnly), ...(earliestResetAt && { earliestResetAt }) } };
+        }
+        return { grade, route: decision.route, expectedModeId: decision.modeId };
       });
       return {
         text: JSON.stringify({
@@ -228,8 +238,8 @@ export function createOperations(store: PreferenceStore, workspaceDir: string, f
         text: JSON.stringify(
           await dispatchWorker(paseo, job, () => {
             const scope = ownerScope(agent.id);
-            return { projects: scope.projects, routing: scope.routing, coordinator: agent.id, excludedProviders: scope.excludedProviders, usageRouting:scope.usageRouting, workerModeOverrides:scope.workerModeOverrides };
-          }),
+            return { projects: scope.projects, routing: scope.routing, coordinator: agent.id, excludedProviders: scope.excludedProviders, workerModeOverrides:scope.workerModeOverrides };
+          }, router),
         ),
       };
     },

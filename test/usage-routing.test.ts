@@ -57,7 +57,7 @@ test("routing preserves explicit choices, required capabilities and host-specifi
   ];
   const fresh = [report("codex",10),report("arbitrary",80)].map(r=>({...r,fetchedAt:new Date().toISOString()}));
   expect(resolveRoute("C",{},catalog,false,fresh)?.provider).toBe("arbitrary");
-  expect(resolveRoute("A",{},catalog,false,fresh)?.provider).toBe("codex");
+  expect(resolveRoute("A",{},catalog,false,fresh)?.provider).toBe("arbitrary");
   expect(resolveRoute("C",{},catalog,true,fresh)?.provider).toBe("codex");
   const pinned={provider:"codex",model:"gpt-6.2-sol",effort:"high"};
   expect(resolveRoute("C",{C:[pinned]},catalog,false,fresh)).toEqual(pinned);

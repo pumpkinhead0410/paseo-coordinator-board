@@ -24,15 +24,15 @@ export function explainEmptyRoute(data: ModelDirectory, grade: Grade, t: Transla
   const saved = data.routing[grade];
   if (saved?.length) {
     const problems = [...new Set(saved.map(row => savedCandidateIssue(data, grade, row, t)).filter(Boolean))];
-    return t(`저장된 후보를 사용할 수 없습니다 (${problems.join(", ")}). 실행기 설정을 확인하거나, 다른 후보를 추가해 저장하거나 ‘추천으로 복원’을 선택하세요.`,
-      `Saved candidates are unavailable (${problems.join(", ")}). Check provider settings, save another candidate, or choose Restore defaults.`);
+    return t(`저장된 후보를 사용할 수 없습니다 (${problems.join(", ")}). 실행기 설정을 확인하거나, 다른 후보를 추가해 저장하거나 ‘Selector로 복원’을 선택하세요.`,
+      `Saved candidates are unavailable (${problems.join(", ")}). Check provider settings, save another candidate, or choose Restore selector routing.`);
   }
   if (!data.providers.length) return t("Paseo에서 실행기를 연결한 뒤 목록을 새로 고쳐 주세요.", "Connect a provider in Paseo, then refresh the catalog.");
   const eligible = data.providers.filter(p => eligibleProvider(grade, p.id, false, data.catalog) ||
-    (grade === "M" && (!p.included || !p.available || p.status !== "ready") && ["claude", "codex", "opencode", "copilot"].includes(p.id)));
+    (grade === "M" && (!p.included || !p.available || p.status !== "ready") && ["claude", "codex", "antigravity", "opencode", "copilot"].includes(p.id)));
   if (!eligible.length) {
     if (grade === "M") {
-      return t("코디네이터용 도구와 권한 모드를 확인할 수 없습니다. Claude Code, Codex, OpenCode 또는 Copilot 연결을 확인하거나, 설정에서 Paseo MCP를 사용하는 기존 세션을 코디네이터로 지정하세요.", "No verified coordinator mode is available. Check the connection to Claude Code, Codex, OpenCode or Copilot, or designate an existing session with Paseo MCP in Settings.");
+      return t("코디네이터용 도구와 권한 모드를 확인할 수 없습니다. Claude Code, Codex, Antigravity, OpenCode 또는 Copilot 연결을 확인하거나, 설정에서 Paseo MCP를 사용하는 기존 세션을 코디네이터로 지정하세요.", "No verified coordinator mode is available. Check the connection to Claude Code, Codex, Antigravity, OpenCode or Copilot, or designate an existing session with Paseo MCP in Settings.");
     }
     return t("연결된 실행기의 허용 등급을 확인하고, 이 작업을 맡을 실행기를 Paseo에 연결하세요.", "Check the grades supported by your providers, then connect an eligible provider in Paseo.");
   }
