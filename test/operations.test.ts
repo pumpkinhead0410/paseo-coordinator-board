@@ -452,8 +452,8 @@ test("새 코디네이터는 지원되는 자동 심사 모드를 미리 보여 
   expect(s.sessions.size).toBe(0);
 });
 
-test("OpenCode, Copilot and Antigravity need their actual safe coordinator mode and a tool-capable snapshot before replacing anyone", async () => {
-  for (const [provider, modeId] of [["opencode", "build"], ["copilot", "https://agentclientprotocol.com/protocol/session-modes#agent"], ["antigravity", "auto"]]) {
+test("OpenCode and Copilot need their actual safe coordinator mode and a tool-capable snapshot before replacing anyone", async () => {
+  for (const [provider, modeId] of [["opencode", "build"], ["copilot", "https://agentclientprotocol.com/protocol/session-modes#agent"]]) {
     const s = scenario();
     s.activity.providers = [provider];
     s.activity.modes = [{id:"allow-all",label:"Unrestricted"}, {id:"full-access",label:"Unrestricted"}];
@@ -474,6 +474,18 @@ test("OpenCode, Copilot and Antigravity need their actual safe coordinator mode 
     expect(s.sessions.get(created.sessionId)?.config.modeId).toBe(modeId);
     if (provider === "opencode") expect(s.sessions.get(created.sessionId)?.config.options).toEqual({auto_accept:false});
   }
+});
+
+// AGY CLI는 세션당 도구 선언 예산 때문에 Paseo 도구 일부만 켭니다. 보드 도구 대부분이 빠지므로 코디네이터로 만들지 않습니다.
+test("Antigravity is never offered or created as coordinator, even with a safe auto mode and tool support", async () => {
+  const s = scenario();
+  s.activity.providers = ["antigravity"];
+  s.activity.modes = [{id:"auto",label:"Auto"}, {id:"full-access",label:"Full access"}];
+  const input = {replace:true, expectedCoordinator:coordinator, expectedRoute:{provider:"antigravity",model:alternate.model,effort:null}, expectedModeId:"auto"};
+  expect((await s.call(operationState,{})).coordinatorMode).toBeNull();
+  await expect(s.call(setupCoordinator,input)).rejects.toThrow(/권한 모드/);
+  expect(s.sessions.size).toBe(0);
+  expect(s.store.read().coordinator).toBe(coordinator);
 });
 
 test("M prefers a verified native mode and falls back only when available defaults lack one, never for an unknown agent mode", async () => {

@@ -18,10 +18,11 @@ type Directory = { providers: Omit<ProviderEntry, "included">[]; catalog: Catalo
 
 // Only built-in adapters with a known permission contract and a Paseo tool transport.
 // ACP mode names are provider-specific; a custom "agent" or "auto" is not evidence.
+// Antigravity is deliberately absent: the AGY CLI enables only the smallest Paseo MCP tools that fit its
+// per-session tool budget, so most board tools (plan/assign/classify) are unavailable to an AGY coordinator.
 const coordinatorModes = new Map<string, string[]>([
   ["claude", ["auto", "default"]],
   ["codex", ["auto-review", "auto"]],
-  ["antigravity", ["auto"]],
   ["copilot", ["https://agentclientprotocol.com/protocol/session-modes#agent"]],
   ["opencode", ["build"]],
 ]);
