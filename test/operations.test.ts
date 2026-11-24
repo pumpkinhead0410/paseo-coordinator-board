@@ -29,7 +29,7 @@ const job: DispatchInput = {
   projectId, workspaceId, title: "Test", prompt: "Synthetic task", grade: "C",
   expectedRoute: route, requestKey: "synthetic-job-01",
 };
-type CreateInput = { agentId: string; idempotencyKey: string; clientMessageId: string; parent: string; config: { provider: string; modeId?: string; options?: { auto_accept?: boolean } }; prompt: string; metadata: Record<string, unknown> };
+type CreateInput = { agentId: string; idempotencyKey: string; clientMessageId: string; parent: string; config: { provider: string; modeId?: string; systemPrompt?: string; options?: { auto_accept?: boolean } }; prompt: string; metadata: Record<string, unknown> };
 type Rpc = { name: string; input: { parse(value: unknown): unknown }; output: { parse(value: unknown): unknown } };
 type Callback = (input: unknown, ctx: { paseo: unknown }) => Promise<unknown>;
 const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
@@ -577,4 +577,20 @@ test("로컬 Router의 결정이 설정 미리보기·코디네이터 도구·�
   // 이전 버전과 호환되는 토글은 저장만 되고 배정에는 쓰이지 않는다.
   await s.call(setUsageRouting, { enabled: false, expectedRevision: state.revision });
   expect((await s.call(operationState, {})).usageRouting).toBe(false);
+});
+
+test("assign_board_worker는 job.skills를 계층별 systemPrompt로 주입하고 실행 규율 스킬만 하위 전파 대상으로 기록한다", async () => {
+  const s = scenario();
+  const res = await s.tool("assign_board_worker", {
+    job: { ...job, requestKey: "synthetic-skills-01", skills: ["arena", "ponytail", "test-driven-development"] },
+  });
+  expect(res.skills).toEqual(["arena", "ponytail", "test-driven-development"]);
+  const created = s.sessions.get(res.sessionId);
+  expect(created?.config.systemPrompt).toContain("~/.agents/skills/arena/SKILL.md");
+  expect(created?.config.systemPrompt).toContain("하위 에이전트 전파 의무");
+  expect(created?.config.systemPrompt).toContain("~/.agents/skills/ponytail/SKILL.md");
+  expect(created?.config.systemPrompt).toContain("~/.agents/skills/test-driven-development/SKILL.md");
+  expect(created?.config.systemPrompt).toContain("메인 세션 전용");
+  expect(created?.metadata["coordinator-board/skills"]).toEqual(["arena", "ponytail", "test-driven-development"]);
+  expect(created?.metadata["coordinator-board/propagated-skills"]).toEqual(["ponytail", "test-driven-development"]);
 });
