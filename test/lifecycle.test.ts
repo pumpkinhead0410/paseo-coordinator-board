@@ -206,23 +206,26 @@ test("코디네이터 세션 생성 시 genui SKILL.md가 있으면 frontmatter�
   const missingPath = `${f.path}.missing.md`;
   expect(buildCoordinatorSystemPrompt(missingPath)).not.toContain("[paseo-plugin-genui]");
 
-  // 파일이 비어 있거나 frontmatter만 있어도 기본 charter만 반환
+  // 파일이 비어 있거나 frontmatter만 있어도(빈 frontmatter 포함) 기본 charter만 반환
   writeFileSync(skillPath, "---\nname: genui\n---\n\n");
   expect(buildCoordinatorSystemPrompt(skillPath)).not.toContain("[paseo-plugin-genui]");
+  writeFileSync(skillPath, "---\n---\n");
+  expect(buildCoordinatorSystemPrompt(skillPath)).not.toContain("[paseo-plugin-genui]");
 
-  // 마커가 없는 SKILL.md에도 중복 방지 마커([paseo-plugin-genui])를 자동 부착
+  // 마커가 없는 SKILL.md에도 중복 방지 마커([paseo-plugin-genui])를 1회 자동 부착
   writeFileSync(skillPath, "---\nname: genui\ndescription: test\n---\n\n# Inline UI\nCard(\"Demo\", [])\n");
   const withMarker = buildCoordinatorSystemPrompt(skillPath);
-  expect(withMarker).toContain("[paseo-plugin-genui]");
+  expect(withMarker.split("[paseo-plugin-genui]").length - 1).toBe(1);
   expect(withMarker).not.toContain("description: test");
   expect(withMarker).toContain("Card(\"Demo\", [])");
 
-  // 이미 마커가 있는 SKILL.md는 중복 부착하지 않고 코디네이터 systemPrompt에 그대로 주입
-  writeFileSync(skillPath, "---\nname: genui\n---\n\n[paseo-plugin-genui]\n\n# Inline UI reference\n");
+  // 입력에 마커가 중복되어 있어도 정확히 1회만 남기고, 헌장에 genui 메인 전용 안내를 포함
+  writeFileSync(skillPath, "---\nname: genui\n---\n\n[paseo-plugin-genui]\n\n[paseo-plugin-genui]\n\n# Inline UI reference\n");
   const withGenui = new CoordinatorLifecycle(f.prefs, f.directory, skillPath);
   await withGenui.ensure(f.sdk, start);
   const prompt: string = f.creations[0].config.systemPrompt;
   expect(prompt).toContain("read_board_conversation");
+  expect(prompt).toContain("genui(메인 세션 전용)");
   expect(prompt).toContain("# Inline UI reference");
   expect(prompt.split("[paseo-plugin-genui]").length - 1).toBe(1);
   expect(prompt).not.toContain("name: genui");
