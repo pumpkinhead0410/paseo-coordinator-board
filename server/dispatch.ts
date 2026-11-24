@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { reportingKey } from "../shared/contract";
 import {
-  dispatchInputSchema, type CatalogModel, type DispatchInput, type ProviderEntry, type RouteChoice, type RoutePolicy, type WorkspaceChoice,
+  buildWorkerSkillSystemPrompt, dispatchInputSchema, partitionWorkerSkills,
+  type CatalogModel, type DispatchInput, type ProviderEntry, type RouteChoice, type RoutePolicy, type WorkspaceChoice,
 } from "../shared/dispatch";
 import { holdText, koreanOnly } from "../shared/route-decision";
 import { readPages } from "./discovery";
@@ -161,10 +162,13 @@ export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | 
     return { workerModeOverrides: state.workerModeOverrides ?? {}, coordinator: state.coordinator, routing: state.routing, excluded: state.excludedProviders };
   };
   const initial = scopeForProject();
+  const skillPlan = partitionWorkerSkills(input.skills);
+  const skillPrompt = buildWorkerSkillSystemPrompt(skillPlan.all);
   const sessionId = creationUuid(input.requestKey, "agent");
   const fingerprint = createHash("sha256").update(JSON.stringify([
     input.projectId, input.workspaceId, input.grade, input.title, input.prompt, !!input.needsHooks,
     input.expectedRoute.provider, input.expectedRoute.model, input.expectedRoute.effort,
+    ...(skillPlan.all.length ? [skillPlan.all] : []),
   ])).digest("hex");
   const workspace = paseo.workspaces.ref(input.workspaceId);
   const [target, receipt] = await Promise.all([workspace.refresh(), paseo.agents.ref(sessionId).refresh()]);
@@ -205,10 +209,14 @@ export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | 
     agentId: sessionId, idempotencyKey: "coordinator-board/worker/" + input.requestKey,
     clientMessageId: creationUuid(input.requestKey, "prompt"),
     parent,
-    config: { ...configForRoute(route), ...(modeId && { modeId }) }, title: input.title, prompt: input.prompt,
+    config: { ...configForRoute(route), ...(modeId && { modeId }), ...(skillPrompt && { systemPrompt: skillPrompt }) }, title: input.title, prompt: input.prompt,
     metadata: {
       [reportingKey]: true, [fingerprintKey]: fingerprint, "coordinator-board/grade": input.grade,
       [parentKey]: parent, ...(modeId && { [modeKey]: modeId }),
+      ...(skillPlan.all.length && {
+        "coordinator-board/skills": skillPlan.all,
+        "coordinator-board/propagated-skills": skillPlan.propagated,
+      }),
     },
   });
   if (worker.id !== sessionId || worker.workspaceId !== target.id) throw new Error("생성된 세션과 대상 워크스페이스가 일치하는지 확인해 주세요.");
@@ -217,5 +225,5 @@ export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | 
     if (agent?.currentModeId !== modeId)
       throw new Error(`작업 세션 ${sessionId}을 만들었지만 요청한 권한 '${modeId}'를 확인할 수 없습니다. 기존 세션에서 권한을 확인하세요.`);
   }
-  return { sessionId, route, ...(modeId && { modeId }) };
+  return { sessionId, route, ...(modeId && { modeId }), ...(skillPlan.all.length && { skills: skillPlan.all }) };
 }

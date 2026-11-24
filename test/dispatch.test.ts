@@ -3,7 +3,7 @@ import { test } from "bun:test";
 import { createPaseoApi } from "@getpaseo/client";
 import { dispatchWorker as dispatchWithRouter, readCatalog, readManagedWorkspaces } from "../server/dispatch";
 import { legacyRouter } from "./legacy-router";
-import { effectiveWorkerMode, resolveRoute, validateCandidates, type CatalogModel, type DispatchInput, type RouteChoice } from "../shared/dispatch";
+import { buildWorkerSkillSystemPrompt, effectiveWorkerMode, partitionWorkerSkills, resolveRoute, validateCandidates, type CatalogModel, type DispatchInput, type RouteChoice } from "../shared/dispatch";
 
 // 호스트 Selector 대신 업스트림 추천표로 판정하는 가짜 Router를 주입한다.
 const dispatchWorker: typeof dispatchWithRouter = (paseo, request, scope) => dispatchWithRouter(paseo, request, scope, legacyRouter());
@@ -248,4 +248,52 @@ test("일부 모델 목록 장애는 다른 실행기를 막지 않고 전체 �
   assert.deepEqual((await readCatalog(sdk)).map(m => m.provider), ["codex"]);
   daemon.listProviderModels = async () => { throw new Error("synthetic account diagnostic"); };
   await assert.rejects(readCatalog(sdk), /연결을 확인/);
+});
+
+test("작업자 배정 스킬은 오케스트레이션(메인 전용)과 실행 규율(하위 전파)로 분리해 systemPrompt와 메타데이터에 반영한다", async () => {
+  assert.equal(buildWorkerSkillSystemPrompt(undefined), undefined);
+  assert.equal(buildWorkerSkillSystemPrompt([]), undefined);
+  assert.deepEqual(partitionWorkerSkills(["architect", "ponytail", "ponytail-lite", "systematic-debugging", "ponytail", "custom-skill"]), {
+    all: ["architect", "ponytail", "ponytail-lite", "systematic-debugging", "custom-skill"],
+    mainOnly: ["architect", "custom-skill"],
+    propagated: ["ponytail", "ponytail-lite", "systematic-debugging"],
+  });
+
+  const { sdk, reqs } = host();
+  // 스킬 미지정 시 기존 동작 유지(systemPrompt 미주입)
+  const plain = await dispatchWorker(sdk, task, () => state);
+  assert.equal(reqs[0].config.systemPrompt, undefined);
+  assert.equal("skills" in plain, false);
+
+  // 경로 탈출 등 잘못된 스킬 이름은 스키마에서 거절
+  await assert.rejects(dispatchWorker(sdk, { ...task, requestKey: "request-bad-skill-01", skills: ["../etc/passwd"] }, () => state));
+
+  // 계층별 분리 주입 + 중복 제거 + 멱등성/충돌 검증
+  const skilledTask: DispatchInput = {
+    ...task,
+    requestKey: "request-skills-01",
+    skills: ["architect", "ponytail", "systematic-debugging", "ponytail"],
+  };
+  const res = await dispatchWorker(sdk, skilledTask, () => state);
+  assert.deepEqual(res.skills, ["architect", "ponytail", "systematic-debugging"]);
+  const call = reqs[1];
+  assert.equal(typeof call.config.systemPrompt, "string");
+  assert.match(call.config.systemPrompt!, /~\/\.agents\/skills\/architect\/SKILL\.md/);
+  assert.match(call.config.systemPrompt!, /~\/\.agents\/skills\/ponytail\/SKILL\.md/);
+  assert.match(call.config.systemPrompt!, /하위 에이전트 전파 의무/);
+  assert.match(call.config.systemPrompt!, /메인 세션 전용.*architect/s);
+  assert.deepEqual(call.metadata?.["coordinator-board/skills"], ["architect", "ponytail", "systematic-debugging"]);
+  assert.deepEqual(call.metadata?.["coordinator-board/propagated-skills"], ["ponytail", "systematic-debugging"]);
+
+  // 같은 requestKey에 같은 skills(순서·중복 정규화 포함)는 재확인 성공, 다른 skills는 거절
+  assert.deepEqual(await dispatchWorker(sdk, { ...skilledTask, skills: ["architect", "ponytail", "systematic-debugging"] }, () => state), res);
+  await assert.rejects(dispatchWorker(sdk, { ...skilledTask, skills: ["architect"] }, () => state), /다른 작업/);
+
+  // 메인 전용 스킬만 배정해도 propagated-skills는 빈 배열([])로 명시 기록
+  const mainOnlyRes = await dispatchWorker(sdk, { ...task, requestKey: "request-skills-main-01", skills: ["architect"] }, () => state);
+  assert.deepEqual(mainOnlyRes.skills, ["architect"]);
+  const mainOnlyCall = reqs[2];
+  assert.deepEqual(mainOnlyCall.metadata?.["coordinator-board/skills"], ["architect"]);
+  assert.deepEqual(mainOnlyCall.metadata?.["coordinator-board/propagated-skills"], []);
+  assert.doesNotMatch(mainOnlyCall.config.systemPrompt!, /하위 에이전트 전파 의무/);
 });

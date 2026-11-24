@@ -33,13 +33,78 @@ export const catalogModelSchema = z.object({
   coordinatorMode: z.object({ id: identifier, label: z.string() }).nullable().optional(),
 });
 export const routePolicySchema = z.partialRecord(gradeSchema, z.array(routeChoiceSchema).min(1).max(12));
+export const skillNameSchema = z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
 export const workspaceChoiceSchema = z.object({ id: identifier, projectId, title: z.string() });
 export const dispatchInputSchema = z.strictObject({
   projectId, workspaceId: identifier, grade: workerGradeSchema,
   title: z.string().trim().min(1).max(160), prompt: z.string().trim().min(1).max(24000),
   requestKey: z.string().min(12).max(96).regex(/^[a-zA-Z0-9_-]+$/),
   expectedRoute: routeChoiceSchema, expectedModeId: identifier.optional(), needsHooks: z.boolean().optional(),
+  skills: z.array(skillNameSchema).max(16).optional(),
 });
+
+// Execution-discipline skills stay active across subagents that write, debug, or review code.
+// Orchestration skills (e.g. architect, arena, interrogate, swarm, writing-plans, how) and any
+// unclassified skills remain main-session only so subagents do not trigger recursive fan-out.
+export const PROPAGATED_DISCIPLINE_SKILLS = new Set<string>([
+  "ponytail", "ponytail-audit", "ponytail-review", "ponytail-debt", "ponytail-gain", "ponytail-help",
+  "systematic-debugging", "test-driven-development", "receiving-code-review", "blast-radius",
+]);
+
+export function isPropagatedDisciplineSkill(name: string): boolean {
+  return name === "ponytail" || name.startsWith("ponytail-") || PROPAGATED_DISCIPLINE_SKILLS.has(name);
+}
+
+export function normalizeWorkerSkills(skills?: readonly string[]): string[] {
+  if (!skills?.length) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of skills) {
+    const name = raw.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+export function partitionWorkerSkills(skills?: readonly string[]): { all: string[]; mainOnly: string[]; propagated: string[] } {
+  const all = normalizeWorkerSkills(skills);
+  const mainOnly: string[] = [];
+  const propagated: string[] = [];
+  for (const name of all) {
+    if (isPropagatedDisciplineSkill(name)) propagated.push(name);
+    else mainOnly.push(name);
+  }
+  return { all, mainOnly, propagated };
+}
+
+export function buildWorkerSkillSystemPrompt(skills?: readonly string[]): string | undefined {
+  const { all, mainOnly, propagated } = partitionWorkerSkills(skills);
+  if (!all.length) return undefined;
+  const skillPath = (name: string) => `~/.agents/skills/${name}/SKILL.md`;
+  const lines = [
+    "[코디네이터 배정 스킬]",
+    "작업을 시작하기 전에 아래 스킬의 SKILL.md를 먼저 읽고 절차를 따르세요:",
+    ...all.map(name => `- ${name}: ${skillPath(name)}`),
+  ];
+  if (propagated.length) {
+    lines.push(
+      "",
+      "[하위 에이전트 전파 의무 — 실행 규율 스킬]",
+      "Paseo `create_agent` 또는 하네스 내장 서브에이전트(`Agent`, `spawn_agent`, `invoke_subagent`)로 하위 작업을 위임할 때, 아래 실행 규율 스킬 경로를 하위 에이전트 프롬프트 첫머리에 반드시 함께 전달해 먼저 읽고 따르게 하세요:",
+      ...propagated.map(name => `- ${name}: ${skillPath(name)}`),
+    );
+  }
+  if (mainOnly.length) {
+    lines.push(
+      "",
+      "[메인 세션 전용 — 하위 전파 제외]",
+      `아래 스킬은 이 메인 작업자 세션에서만 수행하고 하위 서브에이전트에는 전파하지 마세요(재귀 위임·중복 방지): ${mainOnly.join(", ")}`,
+    );
+  }
+  return lines.join("\n");
+}
 
 export type Grade = z.infer<typeof gradeSchema>;
 export type WorkerGrade = z.infer<typeof workerGradeSchema>;
