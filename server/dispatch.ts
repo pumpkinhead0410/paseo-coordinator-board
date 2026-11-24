@@ -213,8 +213,10 @@ export async function dispatchWorker(paseo: Pick<Sdk, "agents" | "workspaces" | 
     metadata: {
       [reportingKey]: true, [fingerprintKey]: fingerprint, "coordinator-board/grade": input.grade,
       [parentKey]: parent, ...(modeId && { [modeKey]: modeId }),
-      ...(skillPlan.all.length && { "coordinator-board/skills": skillPlan.all }),
-      ...(skillPlan.propagated.length && { "coordinator-board/propagated-skills": skillPlan.propagated }),
+      ...(skillPlan.all.length && {
+        "coordinator-board/skills": skillPlan.all,
+        "coordinator-board/propagated-skills": skillPlan.propagated,
+      }),
     },
   });
   if (worker.id !== sessionId || worker.workspaceId !== target.id) throw new Error("생성된 세션과 대상 워크스페이스가 일치하는지 확인해 주세요.");

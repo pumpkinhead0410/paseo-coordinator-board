@@ -51,6 +51,10 @@ export const PROPAGATED_DISCIPLINE_SKILLS = new Set<string>([
   "systematic-debugging", "test-driven-development", "receiving-code-review", "blast-radius",
 ]);
 
+export function isPropagatedDisciplineSkill(name: string): boolean {
+  return name === "ponytail" || name.startsWith("ponytail-") || PROPAGATED_DISCIPLINE_SKILLS.has(name);
+}
+
 export function normalizeWorkerSkills(skills?: readonly string[]): string[] {
   if (!skills?.length) return [];
   const seen = new Set<string>();
@@ -69,7 +73,7 @@ export function partitionWorkerSkills(skills?: readonly string[]): { all: string
   const mainOnly: string[] = [];
   const propagated: string[] = [];
   for (const name of all) {
-    if (PROPAGATED_DISCIPLINE_SKILLS.has(name)) propagated.push(name);
+    if (isPropagatedDisciplineSkill(name)) propagated.push(name);
     else mainOnly.push(name);
   }
   return { all, mainOnly, propagated };
@@ -88,7 +92,7 @@ export function buildWorkerSkillSystemPrompt(skills?: readonly string[]): string
     lines.push(
       "",
       "[하위 에이전트 전파 의무 — 실행 규율 스킬]",
-      "Paseo `create_agent` 또는 하네스 내장 서브에이전트(`Agent`, `spawn_agent`, `invoke_subagent`)로 코드 구현·디버깅·리뷰 하위 작업을 위임할 때, 아래 실행 규율 스킬 경로를 하위 에이전트 프롬프트 첫머리에 반드시 함께 전달해 먼저 읽고 따르게 하세요:",
+      "Paseo `create_agent` 또는 하네스 내장 서브에이전트(`Agent`, `spawn_agent`, `invoke_subagent`)로 하위 작업을 위임할 때, 아래 실행 규율 스킬 경로를 하위 에이전트 프롬프트 첫머리에 반드시 함께 전달해 먼저 읽고 따르게 하세요:",
       ...propagated.map(name => `- ${name}: ${skillPath(name)}`),
     );
   }

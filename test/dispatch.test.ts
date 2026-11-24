@@ -253,10 +253,10 @@ test("일부 모델 목록 장애는 다른 실행기를 막지 않고 전체 �
 test("작업자 배정 스킬은 오케스트레이션(메인 전용)과 실행 규율(하위 전파)로 분리해 systemPrompt와 메타데이터에 반영한다", async () => {
   assert.equal(buildWorkerSkillSystemPrompt(undefined), undefined);
   assert.equal(buildWorkerSkillSystemPrompt([]), undefined);
-  assert.deepEqual(partitionWorkerSkills(["architect", "ponytail", "systematic-debugging", "ponytail", "custom-skill"]), {
-    all: ["architect", "ponytail", "systematic-debugging", "custom-skill"],
+  assert.deepEqual(partitionWorkerSkills(["architect", "ponytail", "ponytail-lite", "systematic-debugging", "ponytail", "custom-skill"]), {
+    all: ["architect", "ponytail", "ponytail-lite", "systematic-debugging", "custom-skill"],
     mainOnly: ["architect", "custom-skill"],
-    propagated: ["ponytail", "systematic-debugging"],
+    propagated: ["ponytail", "ponytail-lite", "systematic-debugging"],
   });
 
   const { sdk, reqs } = host();
@@ -288,4 +288,12 @@ test("작업자 배정 스킬은 오케스트레이션(메인 전용)과 실행 
   // 같은 requestKey에 같은 skills(순서·중복 정규화 포함)는 재확인 성공, 다른 skills는 거절
   assert.deepEqual(await dispatchWorker(sdk, { ...skilledTask, skills: ["architect", "ponytail", "systematic-debugging"] }, () => state), res);
   await assert.rejects(dispatchWorker(sdk, { ...skilledTask, skills: ["architect"] }, () => state), /다른 작업/);
+
+  // 메인 전용 스킬만 배정해도 propagated-skills는 빈 배열([])로 명시 기록
+  const mainOnlyRes = await dispatchWorker(sdk, { ...task, requestKey: "request-skills-main-01", skills: ["architect"] }, () => state);
+  assert.deepEqual(mainOnlyRes.skills, ["architect"]);
+  const mainOnlyCall = reqs[2];
+  assert.deepEqual(mainOnlyCall.metadata?.["coordinator-board/skills"], ["architect"]);
+  assert.deepEqual(mainOnlyCall.metadata?.["coordinator-board/propagated-skills"], []);
+  assert.doesNotMatch(mainOnlyCall.config.systemPrompt!, /하위 에이전트 전파 의무/);
 });
