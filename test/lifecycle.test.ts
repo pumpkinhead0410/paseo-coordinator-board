@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachCoordinatorTools } from "../server/coordinator";
 import { ConversationReader } from "../server/conversation";
-import { CoordinatorLifecycle } from "../server/lifecycle";
+import { buildCoordinatorSystemPrompt, CoordinatorLifecycle } from "../server/lifecycle";
 import { isManagedCoordinator, PreferenceStore, setCoordinator } from "../server/preferences";
 
 const paths: string[] = [];
@@ -198,4 +198,32 @@ test("pin failure preserves the coordinator; a manual retry only pins the verifi
   f.ws.refresh = async () => { f.prefs.change(s => setCoordinator(s, "later")); return refresh(); };
   await expect(pin()).rejects.toThrow();
   expect(f.pins.calls).toEqual([true, true]);
+});
+
+test("코디네이터 세션 생성 시 genui SKILL.md가 있으면 frontmatter를 제외해 systemPrompt에 주입하고, 없으면 기본 charter만 유지한다", async () => {
+  const f = setup();
+  const skillPath = `${f.path}.genui.md`;
+  const missingPath = `${f.path}.missing.md`;
+  expect(buildCoordinatorSystemPrompt(missingPath)).not.toContain("[paseo-plugin-genui]");
+
+  // 파일이 비어 있거나 frontmatter만 있어도 기본 charter만 반환
+  writeFileSync(skillPath, "---\nname: genui\n---\n\n");
+  expect(buildCoordinatorSystemPrompt(skillPath)).not.toContain("[paseo-plugin-genui]");
+
+  // 마커가 없는 SKILL.md에도 중복 방지 마커([paseo-plugin-genui])를 자동 부착
+  writeFileSync(skillPath, "---\nname: genui\ndescription: test\n---\n\n# Inline UI\nCard(\"Demo\", [])\n");
+  const withMarker = buildCoordinatorSystemPrompt(skillPath);
+  expect(withMarker).toContain("[paseo-plugin-genui]");
+  expect(withMarker).not.toContain("description: test");
+  expect(withMarker).toContain("Card(\"Demo\", [])");
+
+  // 이미 마커가 있는 SKILL.md는 중복 부착하지 않고 코디네이터 systemPrompt에 그대로 주입
+  writeFileSync(skillPath, "---\nname: genui\n---\n\n[paseo-plugin-genui]\n\n# Inline UI reference\n");
+  const withGenui = new CoordinatorLifecycle(f.prefs, f.directory, skillPath);
+  await withGenui.ensure(f.sdk, start);
+  const prompt: string = f.creations[0].config.systemPrompt;
+  expect(prompt).toContain("read_board_conversation");
+  expect(prompt).toContain("# Inline UI reference");
+  expect(prompt.split("[paseo-plugin-genui]").length - 1).toBe(1);
+  expect(prompt).not.toContain("name: genui");
 });
