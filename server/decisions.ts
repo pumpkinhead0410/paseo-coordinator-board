@@ -23,21 +23,28 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 export function isSupersededAgentNote(
   row: Pick<SessionRow, "id" | "projectId" | "evidenceId">,
   note: Note | undefined,
-  prefs: Pick<Preferences, "judgments">,
+  prefs: Pick<Preferences, "judgments"> & Partial<Pick<Preferences, "supersededAgentNotes">>,
 ) {
   if (note?.origin !== "agent" || note.kind === "clear" || !note.evidenceId) {
     return false;
   }
-  const judgment = prefs.judgments[row.id];
-  if (judgment?.projectId !== row.projectId || judgment.kind !== "idle") return false;
+  const superseded = prefs.supersededAgentNotes?.[row.id];
   if (
-    judgment.supersededAgentNote?.revision === note.revision &&
-    judgment.supersededAgentNote.evidenceId === note.evidenceId &&
+    superseded?.projectId === row.projectId &&
+    superseded.revision === note.revision &&
+    superseded.evidenceId === note.evidenceId &&
     (!row.evidenceId || row.evidenceId !== note.evidenceId)
   ) {
     return true;
   }
-  return !!row.evidenceId && row.evidenceId !== note.evidenceId && judgment.evidenceId === row.evidenceId;
+  const judgment = prefs.judgments[row.id];
+  return (
+    judgment?.projectId === row.projectId &&
+    judgment.kind === "idle" &&
+    !!row.evidenceId &&
+    row.evidenceId !== note.evidenceId &&
+    judgment.evidenceId === row.evidenceId
+  );
 }
 
 export function decorateDecision(row: SessionRow, note: Note | undefined, prefs: Preferences, evidence?: Evidence) {

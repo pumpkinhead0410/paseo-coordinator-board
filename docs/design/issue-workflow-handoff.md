@@ -80,7 +80,10 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 2차 `14272eb7` 지적 3건 반영)**:
   1. `unverifiedIdleReason`이 구현 통합 완료 시 `main` 통합 커밋·검증 영수증/통과·GitHub `COMPLETED`/닫힘 3요소를 각각 대조해 작업 브랜치 커밋 단독 제출을 거절하고, `NOT_PLANNED`는 `OPEN`/제안/질문 상태를 거절하며 확정된 종료 근거만 허용하도록 보강했습니다(`server/coordinator.ts`).
   2. 완료 증빙 검사의 적용 범위를 통합/검증 대기 및 완료·`NOT_PLANNED` 판정으로 좁혀, 통합 완료 뒤 작업 폴더 정리 보류 문구와 #305 사용자 요청 철회의 `idle` 전환이 오차단되지 않도록 분리했습니다(`server/coordinator.ts`).
-  3. `isSupersededAgentNote`와 `activeSessionNote`가 실행 중(`evidenceId` 부재) 상태에서도 저장된 `supersededAgentNote` 판본을 적용하고, `read_board_conversation({})` 목록도 동일한 `isSupersededAgentNote`를 공유해 `idle → running → idle`에서 카드와 목록이 일치하도록 수정했습니다(`server/decisions.ts`, `shared/decision-count.ts`, `server/coordinator.ts`).
+  3. `isSupersededAgentNote`와 `activeSessionNote`가 실행 중(`evidenceId` 부재) 상태에서도 저장된 해소 판본을 적용하고, `read_board_conversation({})` 목록도 동일한 `isSupersededAgentNote`를 공유해 `idle → running → idle`에서 카드와 목록이 일치하도록 수정했습니다(`server/decisions.ts`, `shared/decision-count.ts`, `server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 3차 `14272eb7` 지적 2건 반영)**:
+  1. `unverifiedIdleReason`이 `COMPLETED`/닫힘 근거를 발췌 원문(`last.text`) 자체에서 요구하도록 강화하고(코디네이터 입력 문구만으로 우회 불가), 검증·종료의 부정·실패·미확인 표현(“통과하지 못했습니다”, “종료 여부는 확인하지 못했습니다”)을 `negatedOutcomePattern`과 확정 종료 정규식으로 차단했습니다(`server/coordinator.ts`).
+  2. 해소된 `agent-note` 판본을 `scope.judgments`에서 분리해 독립 맵 `scope.supersededAgentNotes`에 보관하도록 변경해, 같은 세션에서 별도 작업을 `review`로 분류해도 이전 해소 질문이 복귀하지 않으면서 새 보고(판본 증가)와 프로젝트 해제·세션 재연결 정리가 정확히 유지되도록 했습니다(`server/preferences.ts`, `server/decisions.ts`, `server/coordinator.ts`, `index.server.ts`, `server/session-links.ts`).
 
 ## Acceptance criteria
 

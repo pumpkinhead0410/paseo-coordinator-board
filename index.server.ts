@@ -262,6 +262,7 @@ export default function contribute(server: PluginServerContext) {
           }
           releaseUnmanagedCoordinator(rows, scope);
           for (const [id, d] of Object.entries(scope.judgments)) if (d.projectId === change.projectId) delete scope.judgments[id];
+          for (const [id, d] of Object.entries(scope.supersededAgentNotes)) if (d.projectId === change.projectId) delete scope.supersededAgentNotes[id];
         }
         reader.retain(new Set(managedSessions(rows, scope).map(r => r.id)));
       });

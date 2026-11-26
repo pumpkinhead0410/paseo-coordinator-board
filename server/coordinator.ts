@@ -10,12 +10,13 @@ import { isManagedCoordinator, judgment, PreferenceStore } from "./preferences";
 const integrationCompletionClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현)\s*(?:완료|반영|종료)|\b(?:merged|integrated|completed)\b/i;
 const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
 const pendingIntegrationOrVerificationPattern = /(?:통합|병합|머지|검증|테스트|시험)\s*(?:예정|대기|미실행|미검증|미완|불충족|필요|남았|남아)|최종\s*검증(?:이|은)?\s*(?:남았|남아|대기|미실행|미검증|필요)|\b(?:not\s+(?:verified|tested|completed|merged)|verification\s+(?:pending|remaining)|integration\s+(?:pending|remaining)|tests?\s+failed)\b/i;
+const negatedOutcomePattern = /(?:통과|검증|확인|완료|닫혔|닫힘|종료|반영|통합|포함)(?:을|를|은|는|이|가|\s*여부(?:는|를|가)?)?\s*(?:하지\s*못|못\s*했|못함|하지\s*않|않았|되지\s*않|안\s*됨|실패|미확인|미완료|불가)|(?:검증|테스트|시험|CI)\s*(?:이|가|은|는)?\s*실패|\b(?:did\s+not\s+(?:pass|verify|confirm|close)|not\s+(?:confirmed|closed|verified|passed)|unconfirmed|failed\s+to\s+(?:pass|verify|confirm|close))\b/i;
 const commitShaPattern = /\b[0-9a-f]{7,40}\b/i;
 const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:main|master)\s*통합\s*커밋|통합\s*커밋|\bmerged\s+into\s+(?:origin\/)?(?:main|master)\b/i;
 const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|CI|D155|회귀|단위\s*시험|검증\s*자료|manifest\.json|영수증|SHA-256).{0,32}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
-const completedClosurePattern = /\bCOMPLETED\b|이슈(?:\s*#\d+)?(?:가|는|를)?\s*(?:완료\s*)?(?:닫혔|닫힘|종료)|GitHub(?:에서)?\s*(?:완료|종료|닫힘|CLOSED|MERGED)|\bclosed\s+as\s+completed\b/i;
+const completedClosurePattern = /\bCOMPLETED\b|이슈(?:\s*#\d+)?(?:가|는|를)?\s*(?:완료\s*)?(?:닫혔|닫힘|종료(?:됐|됨|했|되었|를\s*확인|됨을\s*확인))|GitHub(?:에서)?\s*(?:완료|종료(?:됐|됨|했|되었)|닫혔|닫힘|CLOSED|MERGED)|\bclosed\s+as\s+completed\b/i;
 const openOrProposalPattern = /\bOPEN\b|열려\s*있|닫을까요|종료할까요|닫는\s*것을\s*제안|종료를\s*제안|제안합니다|\b(?:still\s+open|propose\s+closing|should\s+we\s+close)\b/i;
-const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b.{0,24}(?:닫혔|닫힌|종료|확인)|조사.{0,16}중단.{0,32}(?:닫혔|닫힌|종료)|\bclosed\s+as\s+not_planned\b)/i;
+const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|를\s*확인|됨을\s*확인))|조사.{0,16}중단.{0,32}(?:닫혔|닫힌|종료(?:됐|됨|했|되었))|\bclosed\s+as\s+not_planned\b)/i;
 
 export function unverifiedIdleReason(
   latest: Evidence,
@@ -35,18 +36,22 @@ export function unverifiedIdleReason(
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
   }
   if (mentionsNotPlanned) {
-    if (openOrProposalPattern.test(last.text) || /[?？]/.test(last.text) || !confirmedNotPlannedPattern.test(last.text)) {
-      return "NOT_PLANNED 종료가 확정되지 않았거나 열린(OPEN)·제안 상태여서 idle로 분류할 수 없습니다. 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
+    if (
+      openOrProposalPattern.test(last.text) ||
+      negatedOutcomePattern.test(last.text) ||
+      /[?？]/.test(last.text) ||
+      !confirmedNotPlannedPattern.test(last.text)
+    ) {
+      return "NOT_PLANNED 종료가 확정되지 않았거나 열린(OPEN)·제안·미확인 상태여서 idle로 분류할 수 없습니다. 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
     }
     if (!/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) {
       return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
     }
     return null;
   }
-  const combined = `${last.text}\n${inputText}`;
   const hasMainCommit = commitShaPattern.test(last.text) && mainIntegrationTargetPattern.test(last.text);
-  const hasVerification = verificationReceiptPattern.test(last.text);
-  const hasClosure = completedClosurePattern.test(combined) && !openOrProposalPattern.test(last.text);
+  const hasVerification = verificationReceiptPattern.test(last.text) && !negatedOutcomePattern.test(last.text);
+  const hasClosure = completedClosurePattern.test(last.text) && !openOrProposalPattern.test(last.text) && !negatedOutcomePattern.test(last.text);
   if (pendingInSource || !hasMainCommit || !hasVerification || !hasClosure) {
     return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
   }
@@ -147,18 +152,25 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
           });
           if (rejection) throw new Error(rejection);
         }
-        const supersededAgentNote =
-          input.kind === "idle" && !isClarificationReply && currentNote?.origin === "agent" && currentNote.kind !== "clear" && currentNote.evidenceId && currentNote.evidenceId !== input.evidenceId
-            ? { revision: currentNote.revision, evidenceId: currentNote.evidenceId }
-            : input.kind === "idle" && previousSameProject?.supersededAgentNote && currentNote?.revision === previousSameProject.supersededAgentNote.revision && currentNote.evidenceId === previousSameProject.supersededAgentNote.evidenceId
-              ? previousSameProject.supersededAgentNote
-              : undefined;
+        if (
+          input.kind === "idle" &&
+          !isClarificationReply &&
+          currentNote?.origin === "agent" &&
+          currentNote.kind !== "clear" &&
+          currentNote.evidenceId &&
+          currentNote.evidenceId !== input.evidenceId
+        ) {
+          scope.supersededAgentNotes[row.id] = {
+            projectId: row.projectId,
+            revision: currentNote.revision,
+            evidenceId: currentNote.evidenceId,
+          };
+        }
         const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
         scope.judgments[row.id] = {
           ...judgment.parse(input),
           projectId: row.projectId,
           ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),
-          ...(supersededAgentNote ? { supersededAgentNote } : {}),
         };
       });
       return { text: "판단을 해당 세션 카드에 기록했습니다." };

@@ -200,6 +200,30 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/완료 영수증·검증 근거/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
+  // Source missing GitHub closure cannot be bypassed by putting COMPLETED only in coordinator input text.
+  w308.updatedAt = "2026-11-26T05:57:00Z";
+  timelines.get("w308")!.push("cf6f661 원격 main 반영 및 D155 최종검증 통과를 확인했습니다.");
+  const missingClosureExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: missingClosureExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 cf6f661 원격 main 통합 · GitHub COMPLETED 확인",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
+
+  // Negated verification ("검증은 통과하지 못했습니다") is rejected fail-closed even when commit & COMPLETED appear.
+  w308.updatedAt = "2026-11-26T05:58:00Z";
+  timelines.get("w308")!.push("cf6f661 원격 main 반영 및 GitHub COMPLETED 상태이나 D155 최종검증은 통과하지 못했습니다.");
+  const failedVerifyExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: failedVerifyExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 cf6f661 원격 main 통합 완료",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
+
   // 2. Integration finishes while w308 is running /done -> fail-closed with actionable running message.
   w308.status = "running";
   await expect(run("classify_board_conversation", {
@@ -282,6 +306,17 @@ test("#303 NOT_PLANNED (confirmed vs OPEN proposal) and #305 staged human decisi
   await expect(run("classify_board_conversation", {
     sessionId: "w303",
     evidenceId: openProposal.evidenceId,
+    kind: "idle",
+    text: "#303 NOT_PLANNED 종료",
+  })).rejects.toThrow(/NOT_PLANNED/);
+
+  // Unconfirmed NOT_PLANNED closure ("종료 여부는 확인하지 못했습니다") is also rejected fail-closed!
+  w303.updatedAt = "2026-11-26T05:51:00Z";
+  timelines.get("w303")!.push("조사를 중단했으나 GitHub NOT_PLANNED 종료 여부는 확인하지 못했습니다.");
+  const unconfirmedNotPlanned = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w303",
+    evidenceId: unconfirmedNotPlanned.evidenceId,
     kind: "idle",
     text: "#303 NOT_PLANNED 종료",
   })).rejects.toThrow(/NOT_PLANNED/);
@@ -416,15 +451,15 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(sameEv.lane).toBe("human");
   expect(sameEv.count).toBe(1);
 
-  // 3. Newer evidence ev2 with coordinator idle judgment (binding supersededAgentNote rev 1) supersedes the ev1 agent-note!
+  // 3. Newer evidence ev2 with coordinator idle judgment (binding supersededAgentNotes rev 1) supersedes the ev1 agent-note!
   prefs.change(s => {
     s.judgments.w308 = {
       projectId: "easydocs",
       evidenceId: ev2.id,
       kind: "idle",
       text: "#308 cf6f661 통합 완료",
-      supersededAgentNote: { revision: 1, evidenceId: ev1.id },
     };
+    s.supersededAgentNotes.w308 = { projectId: "easydocs", revision: 1, evidenceId: ev1.id };
   });
   const after = evaluate(baseRow("w308", ev2), ev2);
   expect(after.row.agentNoteSuperseded).toBe(true);
@@ -463,6 +498,16 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(displayLane(runningRow, runningNote)).toBe("running");
   expect(decisionCount({ sessions: [runningRow], notes: { w308: runningNote } })).toBe(0);
 
+  // 4c. Classifying a separate later turn as `review` keeps the previously superseded rev-1 question suppressed (no resurrection into My decisions)!
+  prefs.change(s => {
+    s.judgments.w308 = { projectId: "easydocs", evidenceId: ev3.id, kind: "review", text: "별도 후속 작업 결과 확인" };
+  });
+  const separateReview = evaluate(baseRow("w308", ev3), ev3);
+  expect(separateReview.row.agentNoteSuperseded).toBe(true);
+  expect(separateReview.row.decision).toBeUndefined();
+  expect(separateReview.lane).toBe("review");
+  expect(separateReview.count).toBe(0);
+
   // 5. A brand-new report_to_board on ev3 (incrementing revision to 2) immediately becomes active!
   expect(recordReport(notes, "w308", { kind: "question", text: "새 후속 확인이 필요합니다." }, ev3.id).isError).not.toBe(true);
   const newReport = evaluate(baseRow("w308", ev3), ev3);
@@ -480,8 +525,8 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
       evidenceId: ev2.id,
       kind: "idle",
       text: "#308 통합 완료",
-      supersededAgentNote: { revision: 1, evidenceId: ev1.id },
     };
+    s.supersededAgentNotes.w308r = { projectId: "easydocs", revision: 1, evidenceId: ev1.id };
   });
   const afterReview = evaluate(baseRow("w308r", ev2), ev2);
   expect(afterReview.row.agentNoteSuperseded).toBe(true);
