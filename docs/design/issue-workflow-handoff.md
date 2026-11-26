@@ -77,6 +77,10 @@ await classify_board_conversation({
   1. `classify_board_conversation`의 `unverifiedIdleReason`으로 검증 대기/완료 주장을 근거 없이 `idle`로 내리는 경로를 fail-closed 차단하고, `NOT_PLANNED` 조사 중단(#303)은 통합 커밋 없이 중단 사유·`NOT_PLANNED` 종료 근거로 별도 판정하도록 분리했습니다(`server/coordinator.ts`, `server/digest.ts`, `server/lifecycle.ts`, `templates/coordinator-session.md`).
   2. `scope.judgments[].supersededAgentNote`에 해소된 `agent-note`의 `{ revision, evidenceId }`를 저장해, 무관한 후속 발화 뒤 이전 `agent-note`가 복귀하지 않으면서 새 `report_to_board`(판본 증가)는 즉시 활성화되도록 수정하고 `read_board_conversation({})` 목록에서도 비활성화된 `agent-note`를 제외해 카드 상태와 일치시켰습니다(`server/preferences.ts`, `server/decisions.ts`, `server/coordinator.ts`).
   3. `report_to_board`가 `timeline.refetch` 이후 저장 직전에 `handle.refresh()`로 보고 설정과 보관 상태를 재검사해 TOCTOU 경쟁을 닫았습니다(`server/reporting.ts`).
+- **2026-11-27 (독립 의도 리뷰 2차 `14272eb7` 지적 3건 반영)**:
+  1. `unverifiedIdleReason`이 구현 통합 완료 시 `main` 통합 커밋·검증 영수증/통과·GitHub `COMPLETED`/닫힘 3요소를 각각 대조해 작업 브랜치 커밋 단독 제출을 거절하고, `NOT_PLANNED`는 `OPEN`/제안/질문 상태를 거절하며 확정된 종료 근거만 허용하도록 보강했습니다(`server/coordinator.ts`).
+  2. 완료 증빙 검사의 적용 범위를 통합/검증 대기 및 완료·`NOT_PLANNED` 판정으로 좁혀, 통합 완료 뒤 작업 폴더 정리 보류 문구와 #305 사용자 요청 철회의 `idle` 전환이 오차단되지 않도록 분리했습니다(`server/coordinator.ts`).
+  3. `isSupersededAgentNote`와 `activeSessionNote`가 실행 중(`evidenceId` 부재) 상태에서도 저장된 `supersededAgentNote` 판본을 적용하고, `read_board_conversation({})` 목록도 동일한 `isSupersededAgentNote`를 공유해 `idle → running → idle`에서 카드와 목록이 일치하도록 수정했습니다(`server/decisions.ts`, `shared/decision-count.ts`, `server/coordinator.ts`).
 
 ## Acceptance criteria
 

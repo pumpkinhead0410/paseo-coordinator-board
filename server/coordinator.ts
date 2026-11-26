@@ -1,30 +1,54 @@
 import { defineAgentTool, type AgentToolDefinition, type PluginHandlerContext, type PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { ConversationReader, type Evidence } from "./conversation";
+import { isSupersededAgentNote } from "./decisions";
 import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
 import { isManagedCoordinator, judgment, PreferenceStore } from "./preferences";
 
-const completionClaimPattern = /완료|통합|종결|반영|머지|병합|종료|\b(?:completed|merged|integrated|closed|verified|passed)\b/i;
-const unverifiedWorkPattern = /(?:통합|병합|머지|검증|테스트|시험)\s*(?:예정|대기|미실행|미검증|미완|불충족|필요|남았|남아)|최종\s*검증(?:이|은)?\s*(?:남았|남아|대기|미실행|미검증|필요)|(?:아직|미완|보류|실패|재검증|재확인)|\b(?:pending|unverified|not\s+(?:verified|tested|completed|merged)|incomplete|failed|recheck)\b/i;
-const affirmativeCompletionPattern = /(?:완료|통과|검증|확인|마쳤|반영|포함|닫혔|종료|\b(?:merged|completed|verified|passed|confirmed)\b)/i;
-const receiptProofPattern = /\b[0-9a-f]{7,40}\b|\bCOMPLETED\b|\bMERGED\b|원격\s*main|main\s*통합|최종\s*검증\s*통과|CI\s*(?:통과|성공)|manifest\.json|영수증/i;
+const integrationCompletionClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현)\s*(?:완료|반영|종료)|\b(?:merged|integrated|completed)\b/i;
+const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
+const pendingIntegrationOrVerificationPattern = /(?:통합|병합|머지|검증|테스트|시험)\s*(?:예정|대기|미실행|미검증|미완|불충족|필요|남았|남아)|최종\s*검증(?:이|은)?\s*(?:남았|남아|대기|미실행|미검증|필요)|\b(?:not\s+(?:verified|tested|completed|merged)|verification\s+(?:pending|remaining)|integration\s+(?:pending|remaining)|tests?\s+failed)\b/i;
+const commitShaPattern = /\b[0-9a-f]{7,40}\b/i;
+const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:main|master)\s*통합\s*커밋|통합\s*커밋|\bmerged\s+into\s+(?:origin\/)?(?:main|master)\b/i;
+const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|CI|D155|회귀|단위\s*시험|검증\s*자료|manifest\.json|영수증|SHA-256).{0,32}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
+const completedClosurePattern = /\bCOMPLETED\b|이슈(?:\s*#\d+)?(?:가|는|를)?\s*(?:완료\s*)?(?:닫혔|닫힘|종료)|GitHub(?:에서)?\s*(?:완료|종료|닫힘|CLOSED|MERGED)|\bclosed\s+as\s+completed\b/i;
+const openOrProposalPattern = /\bOPEN\b|열려\s*있|닫을까요|종료할까요|닫는\s*것을\s*제안|종료를\s*제안|제안합니다|\b(?:still\s+open|propose\s+closing|should\s+we\s+close)\b/i;
+const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b.{0,24}(?:닫혔|닫힌|종료|확인)|조사.{0,16}중단.{0,32}(?:닫혔|닫힌|종료)|\bclosed\s+as\s+not_planned\b)/i;
 
-export function unverifiedIdleReason(latest: Evidence, inputText: string, clearingPending: boolean, isClarificationReply: boolean): string | null {
-  if (isClarificationReply) return null;
-  if (!clearingPending && !completionClaimPattern.test(inputText)) return null;
+export function unverifiedIdleReason(
+  latest: Evidence,
+  inputText: string,
+  context: { previousKind?: "question" | "review" | "idle"; previousText?: string; hasActiveAgentNote: boolean; isClarificationReply: boolean },
+): string | null {
+  if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
+  const mentionsNotPlanned = /\bNOT_PLANNED\b|조사\s*중단/i.test(inputText) || (!!last && /\bNOT_PLANNED\b|조사\s*중단/i.test(last.text));
+  const pendingInSource = !!last && pendingIntegrationOrVerificationPattern.test(last.text);
+  const claimsIntegrationCompletion =
+    integrationCompletionClaimPattern.test(inputText) ||
+    (context.previousKind === "review" && integrationReviewContextPattern.test(context.previousText ?? "")) ||
+    (context.hasActiveAgentNote && /완료|통합|종결|종료|반영|통과/.test(inputText));
+  if (!mentionsNotPlanned && !pendingInSource && !claimsIntegrationCompletion) return null;
   if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
   }
-  const sourceNotPlanned = /\bNOT_PLANNED\b/i.test(last.text) || (/조사.{0,12}중단/.test(last.text) && /닫|종료/.test(last.text));
-  if (sourceNotPlanned) {
-    if (/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) return null;
-    return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
+  if (mentionsNotPlanned) {
+    if (openOrProposalPattern.test(last.text) || /[?？]/.test(last.text) || !confirmedNotPlannedPattern.test(last.text)) {
+      return "NOT_PLANNED 종료가 확정되지 않았거나 열린(OPEN)·제안 상태여서 idle로 분류할 수 없습니다. 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
+    }
+    if (!/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) {
+      return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
+    }
+    return null;
   }
-  if (unverifiedWorkPattern.test(last.text) || !affirmativeCompletionPattern.test(last.text) || !receiptProofPattern.test(last.text)) {
-    return "완료 영수증·검증 근거 또는 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
+  const combined = `${last.text}\n${inputText}`;
+  const hasMainCommit = commitShaPattern.test(last.text) && mainIntegrationTargetPattern.test(last.text);
+  const hasVerification = verificationReceiptPattern.test(last.text);
+  const hasClosure = completedClosurePattern.test(combined) && !openOrProposalPattern.test(last.text);
+  if (pendingInSource || !hasMainCommit || !hasVerification || !hasClosure) {
+    return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
   }
   return null;
 }
@@ -67,15 +91,7 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
             needsRecommendation = matchedJudgment.evidenceId === evidence?.id;
           }
           const activeNote = visibleNotes[r.id];
-          const noteSuperseded = !!(
-            activeNote &&
-            activeNote.origin === "agent" &&
-            activeNote.kind !== "clear" &&
-            activeNote.evidenceId &&
-            matchedJudgment?.kind === "idle" &&
-            matchedJudgment.supersededAgentNote?.revision === activeNote.revision &&
-            matchedJudgment.supersededAgentNote.evidenceId === activeNote.evidenceId
-          );
+          const noteSuperseded = isSupersededAgentNote(r, activeNote, current);
           listing.push({ id:r.id, projectId:r.projectId, sourceProjectId:r.sourceProjectId, project:r.projectTitle,
             ...(r.workspaceId ? {workspaceId:r.workspaceId} : {}), workspaceTitle:r.workspaceTitle, title:r.title,
             status:r.status, activityAt:r.activityAt,
@@ -121,18 +137,14 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
         const activeAgentNote =
           currentNote?.origin === "agent" &&
           currentNote.kind !== "clear" &&
-          !(
-            previousSameProject?.kind === "idle" &&
-            currentNote.evidenceId &&
-            previousSameProject.supersededAgentNote?.revision === currentNote.revision &&
-            previousSameProject.supersededAgentNote.evidenceId === currentNote.evidenceId
-          );
+          !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, currentNote, scope);
         if (input.kind === "idle") {
-          const clearingPending =
-            previousSameProject?.kind === "review" ||
-            previousSameProject?.kind === "question" ||
-            !!activeAgentNote;
-          const rejection = unverifiedIdleReason(latest, input.text, clearingPending, isClarificationReply);
+          const rejection = unverifiedIdleReason(latest, input.text, {
+            previousKind: previousSameProject?.kind,
+            previousText: previousSameProject?.text,
+            hasActiveAgentNote: !!activeAgentNote,
+            isClarificationReply,
+          });
           if (rejection) throw new Error(rejection);
         }
         const supersededAgentNote =

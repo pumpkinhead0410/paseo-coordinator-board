@@ -25,21 +25,19 @@ export function isSupersededAgentNote(
   note: Note | undefined,
   prefs: Pick<Preferences, "judgments">,
 ) {
-  if (
-    note?.origin !== "agent" ||
-    note.kind === "clear" ||
-    !note.evidenceId ||
-    !row.evidenceId ||
-    note.evidenceId === row.evidenceId
-  ) {
+  if (note?.origin !== "agent" || note.kind === "clear" || !note.evidenceId) {
     return false;
   }
   const judgment = prefs.judgments[row.id];
   if (judgment?.projectId !== row.projectId || judgment.kind !== "idle") return false;
-  return (
-    judgment.evidenceId === row.evidenceId ||
-    (judgment.supersededAgentNote?.revision === note.revision && judgment.supersededAgentNote.evidenceId === note.evidenceId)
-  );
+  if (
+    judgment.supersededAgentNote?.revision === note.revision &&
+    judgment.supersededAgentNote.evidenceId === note.evidenceId &&
+    (!row.evidenceId || row.evidenceId !== note.evidenceId)
+  ) {
+    return true;
+  }
+  return !!row.evidenceId && row.evidenceId !== note.evidenceId && judgment.evidenceId === row.evidenceId;
 }
 
 export function decorateDecision(row: SessionRow, note: Note | undefined, prefs: Preferences, evidence?: Evidence) {

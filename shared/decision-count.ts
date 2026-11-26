@@ -12,8 +12,7 @@ export function activeSessionNote(
     note.origin === "agent" &&
     note.kind !== "clear" &&
     note.evidenceId &&
-    session.evidenceId &&
-    note.evidenceId !== session.evidenceId
+    (!session.evidenceId || note.evidenceId !== session.evidenceId)
   ) {
     return undefined;
   }
