@@ -73,6 +73,10 @@ await classify_board_conversation({
 ## Implementation reconciliation
 
 - **2026-11-27 (사용자 승인 반영 · PD-1~PD-4 모두 추천 후보 채택)**: PD-1 후보 A를 구현하면서 초기 설계에서 언급한 4개 파일 외에 `shared/clarifications.ts`·`server/clarifications.ts`(추가 질문 복원 시 `agentNoteSuperseded` 해제 및 비활성화 일관성)와 `client/project-kanban.tsx`(“이전 세션 보고” 표시)를 함께 맞춰 계약 간 모순을 제거했습니다. `notes.json`의 기존 스키마(`evidenceId`는 이미 선택적 필드로 존재)는 변경 없이 재사용했습니다.
+- **2026-11-27 (독립 의도 리뷰 1차 `14272eb7` 지적 4건 반영)**:
+  1. `classify_board_conversation`의 `unverifiedIdleReason`으로 검증 대기/완료 주장을 근거 없이 `idle`로 내리는 경로를 fail-closed 차단하고, `NOT_PLANNED` 조사 중단(#303)은 통합 커밋 없이 중단 사유·`NOT_PLANNED` 종료 근거로 별도 판정하도록 분리했습니다(`server/coordinator.ts`, `server/digest.ts`, `server/lifecycle.ts`, `templates/coordinator-session.md`).
+  2. `scope.judgments[].supersededAgentNote`에 해소된 `agent-note`의 `{ revision, evidenceId }`를 저장해, 무관한 후속 발화 뒤 이전 `agent-note`가 복귀하지 않으면서 새 `report_to_board`(판본 증가)는 즉시 활성화되도록 수정하고 `read_board_conversation({})` 목록에서도 비활성화된 `agent-note`를 제외해 카드 상태와 일치시켰습니다(`server/preferences.ts`, `server/decisions.ts`, `server/coordinator.ts`).
+  3. `report_to_board`가 `timeline.refetch` 이후 저장 직전에 `handle.refresh()`로 보고 설정과 보관 상태를 재검사해 TOCTOU 경쟁을 닫았습니다(`server/reporting.ts`).
 
 ## Acceptance criteria
 

@@ -31,7 +31,11 @@ const schema = z.object({
     id: z.string(), coordinator: z.string(), expires: z.number(), messageId: z.string().optional(),
     candidates: z.record(z.string(), z.string()),
   }).optional(),
-  judgments: z.record(z.string(), judgment.extend({ projectId: z.string(), requestedAt:z.string().optional() })),
+  judgments: z.record(z.string(), judgment.extend({
+    projectId: z.string(),
+    requestedAt: z.string().optional(),
+    supersededAgentNote: z.object({ revision: z.number().int().nonnegative(), evidenceId: z.string().min(1).max(64) }).optional(),
+  })),
   sessionLinks: z.record(z.string(), sessionLinkSchema).default({}),
   routing: routePolicySchema.default({}),
   excludedProviders: z.array(z.string().min(1).max(256)).default([]),

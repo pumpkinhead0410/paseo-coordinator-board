@@ -1,10 +1,33 @@
 import { defineAgentTool, type AgentToolDefinition, type PluginHandlerContext, type PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { ConversationReader } from "./conversation";
+import { ConversationReader, type Evidence } from "./conversation";
 import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
 import { isManagedCoordinator, judgment, PreferenceStore } from "./preferences";
+
+const completionClaimPattern = /완료|통합|종결|반영|머지|병합|종료|\b(?:completed|merged|integrated|closed|verified|passed)\b/i;
+const unverifiedWorkPattern = /(?:통합|병합|머지|검증|테스트|시험)\s*(?:예정|대기|미실행|미검증|미완|불충족|필요|남았|남아)|최종\s*검증(?:이|은)?\s*(?:남았|남아|대기|미실행|미검증|필요)|(?:아직|미완|보류|실패|재검증|재확인)|\b(?:pending|unverified|not\s+(?:verified|tested|completed|merged)|incomplete|failed|recheck)\b/i;
+const affirmativeCompletionPattern = /(?:완료|통과|검증|확인|마쳤|반영|포함|닫혔|종료|\b(?:merged|completed|verified|passed|confirmed)\b)/i;
+const receiptProofPattern = /\b[0-9a-f]{7,40}\b|\bCOMPLETED\b|\bMERGED\b|원격\s*main|main\s*통합|최종\s*검증\s*통과|CI\s*(?:통과|성공)|manifest\.json|영수증/i;
+
+export function unverifiedIdleReason(latest: Evidence, inputText: string, clearingPending: boolean, isClarificationReply: boolean): string | null {
+  if (isClarificationReply) return null;
+  if (!clearingPending && !completionClaimPattern.test(inputText)) return null;
+  const last = latest.turns.at(-1);
+  if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
+    return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
+  }
+  const sourceNotPlanned = /\bNOT_PLANNED\b/i.test(last.text) || (/조사.{0,12}중단/.test(last.text) && /닫|종료/.test(last.text));
+  if (sourceNotPlanned) {
+    if (/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) return null;
+    return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
+  }
+  if (unverifiedWorkPattern.test(last.text) || !affirmativeCompletionPattern.test(last.text) || !receiptProofPattern.test(last.text)) {
+    return "완료 영수증·검증 근거 또는 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
+  }
+  return null;
+}
 
 export async function managedRowsForCoordinator(paseo: PluginHandlerContext["paseo"], prefs: PreferenceStore, caller: string) {
   const rows = await discoverSessions(paseo);
@@ -44,11 +67,20 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
             needsRecommendation = matchedJudgment.evidenceId === evidence?.id;
           }
           const activeNote = visibleNotes[r.id];
+          const noteSuperseded = !!(
+            activeNote &&
+            activeNote.origin === "agent" &&
+            activeNote.kind !== "clear" &&
+            activeNote.evidenceId &&
+            matchedJudgment?.kind === "idle" &&
+            matchedJudgment.supersededAgentNote?.revision === activeNote.revision &&
+            matchedJudgment.supersededAgentNote.evidenceId === activeNote.evidenceId
+          );
           listing.push({ id:r.id, projectId:r.projectId, sourceProjectId:r.sourceProjectId, project:r.projectTitle,
             ...(r.workspaceId ? {workspaceId:r.workspaceId} : {}), workspaceTitle:r.workspaceTitle, title:r.title,
             status:r.status, activityAt:r.activityAt,
             ...(matchedJudgment ? {judgment:{kind:matchedJudgment.kind, evidenceId:matchedJudgment.evidenceId}} : {}),
-            ...(activeNote && activeNote.kind !== "clear" ? {note:{kind:activeNote.kind, origin:activeNote.origin ?? "person", ...(activeNote.evidenceId ? {evidenceId:activeNote.evidenceId} : {})}} : {}),
+            ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? {note:{kind:activeNote.kind, origin:activeNote.origin ?? "person", ...(activeNote.evidenceId ? {evidenceId:activeNote.evidenceId} : {})}} : {}),
             ...(needsRecommendation ? {needsRecommendation:true}:{}),
             ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? {factCandidate:true} : {}) });
         }
@@ -67,7 +99,7 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated or closed work idle, retrieve the latest verification receipt, integration commit, and GitHub close reason (COMPLETED vs NOT_PLANNED vs OPEN); never claim completion without verified evidence or receipts. Separate product integration outcome from workspace cleanup handoff, keep NOT_PLANNED investigation stops distinct from resolved fixes, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify so stale pre-integration waits do not linger. For a human question, put one concise question in content.question. Give an editable complete reply in content.recommendation and a short evidence-based recommendationReason, or specify the missing input in content.needsInput. Include selectable options (label, reply) only when supported. Older unstructured judgments remain valid. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work idle, retrieve the latest verification receipt, integration commit, and GitHub COMPLETED close reason; for investigation stops closed as NOT_PLANNED, verify the stop reason and NOT_PLANNED closure without requiring an integration commit. Never claim completion or clear a pending verification wait without verified receipts or NOT_PLANNED closure evidence. Separate product integration outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify so stale pre-integration waits do not linger. For a human question, put one concise question in content.question. Give an editable complete reply in content.recommendation and a short evidence-based recommendationReason, or specify the missing input in content.needsInput. Include selectable options (label, reply) only when supported. Older unstructured judgments remain valid. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
@@ -80,12 +112,42 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
       if (row.status !== "idle") throw new Error(`대기 중인 관리 세션을 확인해 주세요(현재 상태: ${row.status ?? "unknown"}).`);
       const latest = await reader.read(paseo, row, true);
       if (!latest?.turns.length || latest.id !== input.evidenceId) throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
+      const currentNote = notes?.visible(new Set([row.id]))[row.id];
       prefs.change(scope => {
         if (scope.coordinator !== agent.id || !isCurrentMembership(row, scope)) throw new Error("관리 범위가 바뀌었습니다.");
         const previous = scope.judgments[row.id];
-        const previousQuestion = previous?.kind === "question" && previous.evidenceId === input.evidenceId && previous.projectId === row.projectId;
-        scope.judgments[row.id] = { ...judgment.parse(input), projectId: row.projectId,
-          ...(input.kind === "question" ? { requestedAt:previousQuestion ? previous.requestedAt : new Date().toISOString() } : {}) };
+        const previousSameProject = previous?.projectId === row.projectId ? previous : undefined;
+        const isClarificationReply = !!latest.lastInputIds?.some(id => scope.clarifications?.[id]);
+        const activeAgentNote =
+          currentNote?.origin === "agent" &&
+          currentNote.kind !== "clear" &&
+          !(
+            previousSameProject?.kind === "idle" &&
+            currentNote.evidenceId &&
+            previousSameProject.supersededAgentNote?.revision === currentNote.revision &&
+            previousSameProject.supersededAgentNote.evidenceId === currentNote.evidenceId
+          );
+        if (input.kind === "idle") {
+          const clearingPending =
+            previousSameProject?.kind === "review" ||
+            previousSameProject?.kind === "question" ||
+            !!activeAgentNote;
+          const rejection = unverifiedIdleReason(latest, input.text, clearingPending, isClarificationReply);
+          if (rejection) throw new Error(rejection);
+        }
+        const supersededAgentNote =
+          input.kind === "idle" && !isClarificationReply && currentNote?.origin === "agent" && currentNote.kind !== "clear" && currentNote.evidenceId && currentNote.evidenceId !== input.evidenceId
+            ? { revision: currentNote.revision, evidenceId: currentNote.evidenceId }
+            : input.kind === "idle" && previousSameProject?.supersededAgentNote && currentNote?.revision === previousSameProject.supersededAgentNote.revision && currentNote.evidenceId === previousSameProject.supersededAgentNote.evidenceId
+              ? previousSameProject.supersededAgentNote
+              : undefined;
+        const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
+        scope.judgments[row.id] = {
+          ...judgment.parse(input),
+          projectId: row.projectId,
+          ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),
+          ...(supersededAgentNote ? { supersededAgentNote } : {}),
+        };
       });
       return { text: "판단을 해당 세션 카드에 기록했습니다." };
     },

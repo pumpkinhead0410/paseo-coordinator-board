@@ -35,7 +35,11 @@ export function isSupersededAgentNote(
     return false;
   }
   const judgment = prefs.judgments[row.id];
-  return judgment?.projectId === row.projectId && judgment.kind === "idle" && judgment.evidenceId === row.evidenceId;
+  if (judgment?.projectId !== row.projectId || judgment.kind !== "idle") return false;
+  return (
+    judgment.evidenceId === row.evidenceId ||
+    (judgment.supersededAgentNote?.revision === note.revision && judgment.supersededAgentNote.evidenceId === note.evidenceId)
+  );
 }
 
 export function decorateDecision(row: SessionRow, note: Note | undefined, prefs: Preferences, evidence?: Evidence) {

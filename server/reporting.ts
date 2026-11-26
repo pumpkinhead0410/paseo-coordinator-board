@@ -40,6 +40,10 @@ export function attachReportTool(server: PluginServerContext, store: NoteStore) 
         } catch {
           // Preserve reporting even when timeline evidence cannot be read on this host.
         }
+        await handle.refresh();
+        if (handle.archivedAt || handle.metadata?.[reportingKey] !== true) {
+          return { isError: true, text: "Board reporting is disabled for this session." };
+        }
       }
       return recordReport(store, agent.id, report, evidenceId);
     },

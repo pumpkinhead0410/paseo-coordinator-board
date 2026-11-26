@@ -148,9 +148,9 @@ test("#308 reproduction: running session rejects stale classification with actio
   const { prefs, notes, agents, timelines, run } = await openIssueBoard();
   const w308 = agents.find(a => a.id === "w308")!;
 
-  // 1. Pre-integration state: worker reported H1 review note and coordinator classified review wait.
-  notes.update({ sessionId: "w308", kind: "review", text: "#308 사람 확인 H1", expectedRevision: 0 }, "agent");
+  // 1. Pre-integration state: worker reported H1 review note (bound to initial evidenceId) and coordinator classified review wait.
   const initialExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  expect(recordReport(notes, "w308", { kind: "review", text: "#308 사람 확인 H1" }, initialExcerpt.evidenceId).isError).not.toBe(true);
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: initialExcerpt.evidenceId,
@@ -158,14 +158,35 @@ test("#308 reproduction: running session rejects stale classification with actio
     text: "#308 사진 교체 버튼 H1 확인을 e9fe346에 기록했습니다. 운영 세션의 실제 통합 결과 최종검증이 남았습니다.",
   });
 
-  // Listing surfaces workspaceId, stale review judgment, and active agent note.
+  // Listing surfaces workspaceId, stale review judgment, and active agent note with its evidenceId.
   const listed = JSON.parse(await run("read_board_conversation"));
   expect(listed.find((r: { id: string }) => r.id === "w308")).toMatchObject({
     workspaceId: "wks_308",
     workspaceTitle: "EasyDocs #308 · 2열 사진 교체 구현",
     judgment: { kind: "review", evidenceId: initialExcerpt.evidenceId },
-    note: { kind: "review", origin: "agent" },
+    note: { kind: "review", origin: "agent", evidenceId: initialExcerpt.evidenceId },
   });
+
+  // Fail-closed: cannot clear verification wait to idle without completion/verification receipt.
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
+
+  // Even on a fresh turn that says "통합 예정, 최종 검증 미실행", idle classification is rejected.
+  w308.updatedAt = "2026-11-26T05:55:00Z";
+  timelines.get("w308")!.push("통합 예정, 최종 검증 미실행");
+  const unverifiedExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: unverifiedExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
 
   // 2. Integration finishes while w308 is running /done -> fail-closed with actionable running message.
   w308.status = "running";
@@ -191,7 +212,7 @@ test("#308 reproduction: running session rejects stale classification with actio
   // 3. Worker finishes /done with integration receipt + separate cleanup handoff.
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub COMPLETED 확인. workspace 정리 인계는 별도 보존·사용 종료 대기.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub COMPLETED 확인. 현재 workspace의 사용 종료 확인이 남아 있어 workspace와 worktree, 로컬 브랜치는 보존 중입니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -202,7 +223,7 @@ test("#308 reproduction: running session rejects stale classification with actio
     text: "#308 cf6f661 통합 완료",
   })).rejects.toThrow(/대화가 바뀌었습니다/);
 
-  // Re-reading latest evidenceId succeeds and replaces the stale review judgment.
+  // Re-reading latest evidenceId succeeds, replaces stale review judgment, and marks the prior agent-note superseded in listing too.
   const latestExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   expect(latestExcerpt.evidenceId).not.toBe(initialExcerpt.evidenceId);
   await run("classify_board_conversation", {
@@ -213,16 +234,27 @@ test("#308 reproduction: running session rejects stale classification with actio
   });
 
   const updated = JSON.parse(await run("read_board_conversation"));
-  expect(updated.find((r: { id: string }) => r.id === "w308").judgment).toEqual({
+  const row308 = updated.find((r: { id: string }) => r.id === "w308");
+  expect(row308.judgment).toEqual({
     kind: "idle",
     evidenceId: latestExcerpt.evidenceId,
   });
+  expect(row308.note).toBeUndefined();
 });
 
 test("#303 NOT_PLANNED and #305 staged human decision are classified cleanly with distinct outcomes", async () => {
   const { prefs, run } = await openIssueBoard();
 
   const e303 = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
+  // Mislabeling a NOT_PLANNED stop as a resolved fix without mentioning NOT_PLANNED/중단 is rejected.
+  await expect(run("classify_board_conversation", {
+    sessionId: "w303",
+    evidenceId: e303.evidenceId,
+    kind: "idle",
+    text: "#303 원인 해결 완료",
+  })).rejects.toThrow(/NOT_PLANNED/);
+
+  // Accurate NOT_PLANNED classification succeeds without requiring an integration commit.
   await run("classify_board_conversation", {
     sessionId: "w303",
     evidenceId: e303.evidenceId,
@@ -259,14 +291,17 @@ test("charter, existing-session template, digest prompts, and board tool descrip
     expect(doc).toContain("local_checkout");
     expect(doc).toContain("NOT_PLANNED");
     expect(doc).toContain("workspaceId");
-    expect(doc).toMatch(/완료 영수증.*완료로 판정하지/);
+    expect(doc).toMatch(/완료 영수증.*완료·종결로 판정하지/);
+    expect(doc).toMatch(/통합 커밋 없이.*NOT_PLANNED/);
     expect(doc).toMatch(/정리 인계/);
   }
 
   expect(digestPrompt).toContain("NOT_PLANNED");
-  expect(digestPrompt).toMatch(/완료로 판정하지/);
+  expect(digestPrompt).toMatch(/통합 커밋 없이.*NOT_PLANNED/);
+  expect(digestPrompt).toMatch(/완료·종결로 판정하지/);
   expect(digestPrompt).toContain("정리 인계");
   expect(englishDigestPrompt).toContain("NOT_PLANNED");
+  expect(englishDigestPrompt).toMatch(/without requiring an integration commit/i);
   expect(englishDigestPrompt).toMatch(/without receipts/i);
   expect(englishDigestPrompt).toMatch(/cleanup handoff/i);
 
@@ -278,10 +313,10 @@ test("charter, existing-session template, digest prompts, and board tool descrip
   expect(tool("read_board_conversation").description).toContain("judgment");
   expect(tool("classify_board_conversation").description).toContain("NOT_PLANNED");
   expect(tool("classify_board_conversation").description).toMatch(/cleanup handoff/i);
-  expect(tool("classify_board_conversation").description).toMatch(/without verified evidence or receipts/i);
+  expect(tool("classify_board_conversation").description).toMatch(/without verified receipts/i);
 });
 
-test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent-note while preserving person-notes, legacy notes, same-evidence notes, and clarifications", () => {
+test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent-note persistently across unrelated turns while preserving new reports, person-notes, legacy notes, same-evidence notes, and clarifications", () => {
   const dir = mkdtempSync(join(tmpdir(), "board-pd1-"));
   dirs.push(dir);
   const prefs = new PreferenceStore(join(dir, "scope.json"));
@@ -301,7 +336,7 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
     entries: [
       { seqEnd: 1, item: { type: "assistant_message", text: "#308 H1 확인을 부탁드립니다." } },
       { seqEnd: 2, item: { type: "assistant_message", text: "#308 cf6f661 원격 main 통합·최종검증·GitHub COMPLETED 확인." } },
-      { seqEnd: 3, item: { type: "assistant_message", text: "후속 확인 사항이 새로 생겼습니다." } },
+      { seqEnd: 3, item: { type: "assistant_message", text: "다음 요청을 기다립니다." } },
     ],
   });
 
@@ -344,8 +379,16 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(sameEv.lane).toBe("human");
   expect(sameEv.count).toBe(1);
 
-  // 3. Newer evidence ev2 with coordinator idle judgment supersedes the earlier ev1 agent-note!
-  prefs.change(s => { s.judgments.w308 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "#308 cf6f661 통합 완료" }; });
+  // 3. Newer evidence ev2 with coordinator idle judgment (binding supersededAgentNote rev 1) supersedes the ev1 agent-note!
+  prefs.change(s => {
+    s.judgments.w308 = {
+      projectId: "easydocs",
+      evidenceId: ev2.id,
+      kind: "idle",
+      text: "#308 cf6f661 통합 완료",
+      supersededAgentNote: { revision: 1, evidenceId: ev1.id },
+    };
+  });
   const after = evaluate(baseRow("w308", ev2), ev2);
   expect(after.row.agentNoteSuperseded).toBe(true);
   expect(after.row.decision).toBeUndefined();
@@ -355,20 +398,38 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   // Revision is preserved in notes.json so NoteEditor edits will not conflict.
   expect(after.note?.revision).toBe(1);
 
-  // 4. Also supersedes earlier agent-note with kind: "review" (exact #308 shape).
+  // 4. Unrelated follow-up turn ev3 (without a new report_to_board) does NOT resurrect the superseded rev-1 agent-note!
+  const unrelatedTurn = evaluate(baseRow("w308", ev3), ev3);
+  expect(unrelatedTurn.row.agentNoteSuperseded).toBe(true);
+  expect(unrelatedTurn.row.decision).toBeUndefined();
+  expect(unrelatedTurn.lane).toBe("idle");
+  expect(unrelatedTurn.count).toBe(0);
+
+  // 5. A brand-new report_to_board on ev3 (incrementing revision to 2) immediately becomes active!
+  expect(recordReport(notes, "w308", { kind: "question", text: "새 후속 확인이 필요합니다." }, ev3.id).isError).not.toBe(true);
+  const newReport = evaluate(baseRow("w308", ev3), ev3);
+  expect(newReport.note?.revision).toBe(2);
+  expect(newReport.row.agentNoteSuperseded).toBeUndefined();
+  expect(newReport.row.decision).toMatchObject({ source: "agent-note", question: "새 후속 확인이 필요합니다." });
+  expect(newReport.lane).toBe("human");
+  expect(newReport.count).toBe(1);
+
+  // 6. Also supersedes earlier agent-note with kind: "review" (exact #308 shape).
   expect(recordReport(notes, "w308r", { kind: "review", text: "#308 H1 확인" }, ev1.id).isError).not.toBe(true);
-  prefs.change(s => { s.judgments.w308r = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "#308 통합 완료" }; });
+  prefs.change(s => {
+    s.judgments.w308r = {
+      projectId: "easydocs",
+      evidenceId: ev2.id,
+      kind: "idle",
+      text: "#308 통합 완료",
+      supersededAgentNote: { revision: 1, evidenceId: ev1.id },
+    };
+  });
   const afterReview = evaluate(baseRow("w308r", ev2), ev2);
   expect(afterReview.row.agentNoteSuperseded).toBe(true);
   expect(afterReview.lane).toBe("idle");
 
-  // 5. Subsequent new turn ev3 invalidates ev2 idle judgment -> note is no longer superseded.
-  const nextTurn = evaluate(baseRow("w308", ev3), ev3);
-  expect(nextTurn.row.agentNoteSuperseded).toBeUndefined();
-  expect(nextTurn.lane).toBe("human");
-  expect(nextTurn.count).toBe(1);
-
-  // 6. Human-written person-note is NEVER superseded by coordinator idle judgment.
+  // 7. Human-written person-note is NEVER superseded by coordinator idle judgment.
   notes.update({ sessionId: "person1", kind: "question", text: "사람이 직접 적은 확인", evidenceId: ev1.id, expectedRevision: 0 }, "person");
   prefs.change(s => { s.judgments.person1 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "정리됨" }; });
   const personRes = evaluate(baseRow("person1", ev2), ev2);
@@ -377,7 +438,7 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(personRes.lane).toBe("human");
   expect(personRes.count).toBe(1);
 
-  // 7. Legacy agent-note without evidenceId stays active (fail-closed).
+  // 8. Legacy agent-note without evidenceId stays active (fail-closed).
   expect(recordReport(notes, "legacy1", { kind: "question", text: "레거시 보고" }).isError).not.toBe(true);
   prefs.change(s => { s.judgments.legacy1 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "정리됨" }; });
   const legacyRes = evaluate(baseRow("legacy1", ev2), ev2);
@@ -385,7 +446,7 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(legacyRes.lane).toBe("human");
   expect(legacyRes.count).toBe(1);
 
-  // 8. Clarification explanation turn classified idle still restores the original agent-note decision!
+  // 9. Clarification explanation turn classified idle still restores the original agent-note decision!
   const clarifyMessageId = "11111111-1111-4111-8111-111111111111";
   const clarifyEv = excerpt({
     epoch: "1",
