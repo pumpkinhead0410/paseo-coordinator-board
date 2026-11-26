@@ -87,6 +87,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 4차 `14272eb7` 지적 2건 반영)**:
   1. `completedClosurePattern`과 `confirmedNotPlannedPattern`에서 PR 병합(`MERGED`), 종료 사유 없는 `CLOSED`, 세션 종료 문구를 제외하고 이슈의 명시적 `COMPLETED` / `NOT_PLANNED` 종료 근거만 허용하도록 강화했습니다(`server/coordinator.ts`).
   2. `productOutcomeClauses`로 정리 인계 전용 문장(“작업 폴더 정리는 사용 종료를 확인하지 못해 보류합니다” 등)을 제품 증빙 문장과 분리해 평가하도록 수정해, 정리 보류·사용 종료 미확인 문구가 확인된 통합 결과의 `idle` 갱신을 오차단하지 않도록 했습니다(`server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 5차 `14272eb7` 지적 2건 반영)**:
+  1. `nonIssueStatusPattern`과 `closureCoversTargets`(`extractRepoIssueRefs`·`repoMatchesProject`)를 추가해 GitHub Actions/workflow/PR/CI 등의 `COMPLETED` 상태와 다른 이슈(`#999`)·다른 저장소 종료 근거가 대상 이슈(`#308`, `#303`)의 완료·`NOT_PLANNED` 증빙으로 수락되지 않도록 대조했습니다(`server/coordinator.ts`).
+  2. `productOutcomeClauses`가 `·`, `,`, `및` 및 한국어·영어 접속 어미(`확인했고 작업 폴더는 ...`, `보류하지만 GitHub ...`) 단위로 개별 증빙과 정리 보류 절을 분리하도록 보완해, 같은 문장에 정리 보류·사용 종료 미확인이 이어져도 확인된 통합 판정이 차단되지 않도록 했습니다(`server/coordinator.ts`).
 
 ## Acceptance criteria
 

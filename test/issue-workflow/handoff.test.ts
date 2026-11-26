@@ -224,11 +224,15 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/완료 영수증·검증 근거/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
-  // PR MERGED, reason-less GitHub CLOSED, or generic "build completed" (without explicit COMPLETED close reason) is rejected.
+  // PR MERGED, reason-less GitHub CLOSED, generic "build completed", GitHub Actions COMPLETED,
+  // or another issue (#999) / unrelated repo closure is rejected.
   for (const [ts, text] of [
     ["2026-11-26T05:58:30Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub MERGED 확인."],
     ["2026-11-26T05:58:45Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub CLOSED 확인."],
     ["2026-11-26T05:58:50Z", "cf6f661 merged into main, tests passed, build completed."],
+    ["2026-11-26T05:58:52Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과·GitHub Actions 상태 COMPLETED 확인."],
+    ["2026-11-26T05:58:54Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999는 COMPLETED로 닫혔습니다."],
+    ["2026-11-26T05:58:56Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. other/unrelated#308 COMPLETED 확인."],
   ] as const) {
     w308.updatedAt = ts;
     timelines.get("w308")!.push(text);
@@ -263,10 +267,10 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + separate cleanup hold (including "사용 종료를 확인하지 못해 보류"!).
+  // 3. Worker finishes /done with integration receipt + same-sentence cleanup hold ("확인했고 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다")!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub COMPLETED 확인. 작업 폴더 정리는 사용 종료를 확인하지 못해 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub #308 COMPLETED 종료를 확인했고 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -328,10 +332,11 @@ test("#303 NOT_PLANNED (confirmed vs OPEN proposal) and #305 staged human decisi
     text: "#303 NOT_PLANNED 종료",
   })).rejects.toThrow(/NOT_PLANNED/);
 
-  // Unconfirmed NOT_PLANNED closure ("종료 여부는 확인하지 못했습니다") and session-only exit ("조사를 중단하고 조사 세션을 종료했습니다") are rejected fail-closed even without NOT_PLANNED in inputText!
+  // Unconfirmed NOT_PLANNED closure, session-only exit, and another issue (#999) NOT_PLANNED are rejected fail-closed!
   for (const [ts, text, inputText] of [
     ["2026-11-26T05:51:00Z", "조사를 중단했으나 GitHub NOT_PLANNED 종료 여부는 확인하지 못했습니다.", "#303 NOT_PLANNED 종료"],
     ["2026-11-26T05:52:00Z", "조사를 중단하고 조사 세션을 종료했습니다.", "#303 종결"],
+    ["2026-11-26T05:53:00Z", "#303 조사를 중단했습니다. GitHub 이슈 #999는 NOT_PLANNED로 닫혔습니다.", "#303 NOT_PLANNED 종료"],
   ] as const) {
     w303.updatedAt = ts;
     timelines.get("w303")!.push(text);

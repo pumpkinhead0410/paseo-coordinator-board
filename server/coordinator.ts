@@ -14,23 +14,97 @@ const negatedOutcomePattern = /(?:통과|검증|확인|완료|닫혔|닫힘|닫�
 const commitShaPattern = /\b[0-9a-f]{7,40}\b/i;
 const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:main|master)\s*통합\s*커밋|통합\s*커밋|\bmerged\s+into\s+(?:origin\/)?(?:main|master)\b/i;
 const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|CI|D155|회귀|단위\s*시험|검증\s*자료|manifest\.json|영수증|SHA-256).{0,32}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
-const completedClosurePattern = /(?:GitHub|이슈(?:\s*#\d+)?|issue(?:\s*#\d+)?|stateReason|종료\s*사유)[^.\n]{0,24}\bCOMPLETED\b|\bCOMPLETED\b(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|를\s*확인|됨을\s*확인)|확인)|이슈(?:\s*#\d+)?(?:가|는|를|이)?\s*완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+completed\b/i;
+const nonIssueStatusPattern = /(?:GitHub\s+Actions|\bActions\b|workflow|워크플로(?:우)?|\bchecks?\b|체크|\bjobs?\b|\bpipeline\b|파이프라인|\b(?:pull\s*request|PR)\b(?:\s*#\d+)?|\bCI\b(?:\s*(?:실행|상태|워크플로|체크|잡))?|빌드|\bbuild\b|배포|\bdeployment\b|세션|\bsession\b)/i;
+const completedClosurePattern = new RegExp(
+  [
+    String.raw`(?:GitHub(?:\s*(?:에서|이슈(?:\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)?|issue(?:\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)?|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+))?|이슈(?:\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)?|issue(?:\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)?|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+|stateReason|종료\s*사유)\s*(?:가|는|를|이|은|:|=)?\s*(?:로|으로)?\s*\bCOMPLETED\b`,
+    String.raw`\bCOMPLETED\b(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)|확인)`,
+    String.raw`이슈(?:\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)?(?:가|는|를|이|은)?\s*완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
+    String.raw`\bclosed\s+as\s+[Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee][Dd]\b`,
+  ].join("|"),
+);
 const openOrProposalPattern = /\bOPEN\b|열려\s*있|닫을까요|종료할까요|닫는\s*것을\s*제안|종료를\s*제안|제안합니다|\b(?:still\s+open|propose\s+closing|should\s+we\s+close)\b/i;
-const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+not_planned\b)/i;
-const cleanupClausePattern = /(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계|사용\s*종료)/i;
+const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+not_planned\b)/i;
+const cleanupClausePattern = /(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계|폴더\s*정리|브랜치\s*정리|사용\s*종료|정리(?:는|를|가|의)?\s*(?:아직|별도|보류|추후|미진행))/i;
 const productEvidenceClausePattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|회귀|\bCI\b|D155|GitHub|\bCOMPLETED\b|\bNOT_PLANNED\b|원격\s*main|main\s*(?:에\s*)?(?:통합|반영|병합|머지|포함))/i;
+const clauseConnectorSplitPattern = /(?<=(?:했고|하고|했으며|하며|했지만|하지만|했으나|하나|됐고|되고|되었고|되었으나|되었지만|되었으며|했는데|하는데|완료했고|확인했고|통과했고|닫혔고|종료됐고|종료되었고|중단했고|중단했으나|보류하지만|보류했으나|보류했고|보류하고|보류하며|보류했으며|보류했지만|남겨두지만|유지하지만|\band\b|\bbut\b|\bwhile\b|\bhowever\b))\s+(?=(?:(?:단|다만)\s*,?\s*)?(?:(?:이슈(?:\s*#\d+)?\s*)?(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계|폴더\s*정리|브랜치\s*정리|정리(?:는|를|의|가)|최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|회귀|\bCI\b|D155|GitHub|원격\s*main|main\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|[0-9a-f]{7,40}\b)))/i;
+
+function extractRepoIssueRefs(text: string): { issues: Set<string>; repos: Set<string> } {
+  const withoutPr = text.replace(/(?:\bPR\b|pull\s*request|풀\s*리퀘스트)\s*#\d+\b/gi, " ");
+  const issues = new Set<string>();
+  const repos = new Set<string>();
+  for (const match of withoutPr.matchAll(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)\b/g)) {
+    if (match[1]) repos.add(match[1].toLowerCase());
+    issues.add(match[2]);
+  }
+  return { issues, repos };
+}
+
+function repoMatchesProject(repo: string, projectTitle?: string): boolean {
+  if (!projectTitle) return true;
+  const repoLeaf = (repo.split("/").pop() ?? repo).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const projectNorm = projectTitle.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!repoLeaf || !projectNorm) return true;
+  return repoLeaf === projectNorm || projectNorm.includes(repoLeaf) || repoLeaf.includes(projectNorm);
+}
 
 function productOutcomeClauses(text: string): string[] {
   return text
-    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|,\s*(?:(?:단|다만)\s*,?\s*)?(?=(?:이슈(?:\s*#\d+)?\s*)?(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계)))/)
+    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|,\s+|(?<!#\d+)\s*·\s*(?!#\d+\b)|\s+및\s+(?=(?:GitHub|이슈|issue|작업\s*폴더|워크스페이스|정리)))/i)
+    .flatMap(segment => segment.split(clauseConnectorSplitPattern))
     .map(clause => clause.trim())
     .filter(clause => clause.length > 0 && !(cleanupClausePattern.test(clause) && !productEvidenceClausePattern.test(clause)));
+}
+
+function closureCoversTargets(
+  closureUnits: string[],
+  targetIssues: Set<string>,
+  lastText: string,
+  projectTitle?: string,
+): boolean {
+  if (closureUnits.length === 0) return false;
+  const validUnits = closureUnits.filter(u => {
+    const { repos } = extractRepoIssueRefs(u);
+    return [...repos].every(repo => repoMatchesProject(repo, projectTitle));
+  });
+  if (validUnits.length === 0) return false;
+  if (targetIssues.size === 0) return true;
+
+  const coveredExplicit = new Set<string>();
+  let hasUnnumberedClosure = false;
+  for (const unit of validUnits) {
+    const { issues } = extractRepoIssueRefs(unit);
+    if (issues.size === 0) {
+      hasUnnumberedClosure = true;
+    } else {
+      for (const id of issues) coveredExplicit.add(id);
+    }
+  }
+  if ([...targetIssues].every(id => coveredExplicit.has(id))) return true;
+  if (hasUnnumberedClosure) {
+    const { issues: allTextIssues } = extractRepoIssueRefs(lastText);
+    if (
+      allTextIssues.size === 0 ||
+      ([...targetIssues].every(id => allTextIssues.has(id)) && [...allTextIssues].every(id => targetIssues.has(id)))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function unverifiedIdleReason(
   latest: Evidence,
   inputText: string,
-  context: { previousKind?: "question" | "review" | "idle"; previousText?: string; hasActiveAgentNote: boolean; isClarificationReply: boolean },
+  context: {
+    previousKind?: "question" | "review" | "idle";
+    previousText?: string;
+    sessionTitle?: string;
+    workspaceTitle?: string;
+    projectTitle?: string;
+    hasActiveAgentNote: boolean;
+    isClarificationReply: boolean;
+  },
 ): string | null {
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
@@ -45,11 +119,26 @@ export function unverifiedIdleReason(
   if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
   }
+
+  let targetIssues = extractRepoIssueRefs(inputText).issues;
+  if (targetIssues.size === 0) {
+    targetIssues = extractRepoIssueRefs(`${context.previousText ?? ""} ${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`).issues;
+  }
+  if (targetIssues.size === 0) {
+    const nonClosureText = clauses
+      .filter(c => !completedClosurePattern.test(c) && !confirmedNotPlannedPattern.test(c))
+      .join(" ");
+    targetIssues = extractRepoIssueRefs(nonClosureText).issues;
+  }
+
   if (mentionsNotPlanned) {
     const hasProblem = clauses.some(c => openOrProposalPattern.test(c) || negatedOutcomePattern.test(c) || /[?？]/.test(c));
-    const hasConfirmed = clauses.some(c => confirmedNotPlannedPattern.test(c) && !negatedOutcomePattern.test(c));
+    const notPlannedClosureUnits = clauses.filter(
+      c => confirmedNotPlannedPattern.test(c) && !nonIssueStatusPattern.test(c) && !negatedOutcomePattern.test(c),
+    );
+    const hasConfirmed = closureCoversTargets(notPlannedClosureUnits, targetIssues, last.text, context.projectTitle);
     if (hasProblem || !hasConfirmed) {
-      return "NOT_PLANNED 종료가 확정되지 않았거나 열린(OPEN)·제안·미확인 상태여서 idle로 분류할 수 없습니다. 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
+      return "NOT_PLANNED 종료가 확정되지 않았거나 대상 이슈와 일치하지 않거나 열린(OPEN)·제안·미확인 상태여서 idle로 분류할 수 없습니다. 대상 이슈의 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
     }
     if (!/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) {
       return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
@@ -59,9 +148,16 @@ export function unverifiedIdleReason(
   const hasNegatedProductOutcome = clauses.some(c => negatedOutcomePattern.test(c) || openOrProposalPattern.test(c));
   const hasMainCommit = clauses.some(c => commitShaPattern.test(c) && mainIntegrationTargetPattern.test(c) && !negatedOutcomePattern.test(c));
   const hasVerification = clauses.some(c => verificationReceiptPattern.test(c) && !negatedOutcomePattern.test(c));
-  const hasClosure = clauses.some(c => completedClosurePattern.test(c) && !openOrProposalPattern.test(c) && !negatedOutcomePattern.test(c));
+  const completedClosureUnits = clauses.filter(
+    c =>
+      completedClosurePattern.test(c) &&
+      !nonIssueStatusPattern.test(c) &&
+      !openOrProposalPattern.test(c) &&
+      !negatedOutcomePattern.test(c),
+  );
+  const hasClosure = closureCoversTargets(completedClosureUnits, targetIssues, last.text, context.projectTitle);
   if (pendingInSource || hasNegatedProductOutcome || !hasMainCommit || !hasVerification || !hasClosure) {
-    return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
+    return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·대상 이슈의 GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·대상 이슈의 GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
   }
   return null;
 }
@@ -155,6 +251,9 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
           const rejection = unverifiedIdleReason(latest, input.text, {
             previousKind: previousSameProject?.kind,
             previousText: previousSameProject?.text,
+            sessionTitle: row.title,
+            workspaceTitle: row.workspaceTitle,
+            projectTitle: row.projectTitle,
             hasActiveAgentNote: !!activeAgentNote,
             isClarificationReply,
           });
