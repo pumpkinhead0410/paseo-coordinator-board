@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { SessionRow, Note } from "./contract";
+import { activeSessionNote } from "./decision-count";
 import { sourceCoordinatorRecipient, usesSourceCoordinator, type TrackedDecision, type TrackedDecisionView } from "./tracked-decisions";
 import { repositorySlug, type PullRequestView } from "./prs";
 import { matchesWorkspace } from "./workspace-pull";
@@ -74,7 +75,8 @@ export function clarificationKey(card: ClarificationCard) {
 }
 export function sessionClarificationCard(row: SessionRow, note?: Note): ClarificationCard | null {
   if (row.decisionAnswered || (row.nativePending && !row.permissionVersion)) return null;
-  const version = row.decision?.version || (note?.kind === "question" ? "note:" + note.revision : null);
+  const activeNote = activeSessionNote(row, note);
+  const version = row.decision?.version || (activeNote?.kind === "question" ? "note:" + activeNote.revision : null);
   return version ? { kind: "session", projectId: row.projectId, sessionId: row.id, version } : null;
 }
 export function trackedClarificationCard(item: TrackedDecision, sessions: readonly SessionRow[]) {

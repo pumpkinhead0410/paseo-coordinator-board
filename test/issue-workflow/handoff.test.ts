@@ -3,12 +3,18 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachCoordinatorTools } from "../../server/coordinator";
-import { ConversationReader } from "../../server/conversation";
+import { restoreClarifiedDecision } from "../../server/clarifications";
+import { classify, ConversationReader, excerpt } from "../../server/conversation";
+import { decorateDecision, isSupersededAgentNote } from "../../server/decisions";
 import { digestPrompt, englishDigestPrompt } from "../../server/digest";
 import { buildCoordinatorSystemPrompt } from "../../server/lifecycle";
 import { NoteStore } from "../../server/notes";
 import { createOperations } from "../../server/operations";
 import { PreferenceStore } from "../../server/preferences";
+import { recordReport } from "../../server/reporting";
+import { sessionClarificationCard } from "../../shared/clarifications";
+import type { Note, SessionRow } from "../../shared/contract";
+import { decisionCount, displayLane } from "../../shared/decision-count";
 import { legacyRouter } from "../legacy-router";
 
 const dirs: string[] = [];
@@ -273,4 +279,157 @@ test("charter, existing-session template, digest prompts, and board tool descrip
   expect(tool("classify_board_conversation").description).toContain("NOT_PLANNED");
   expect(tool("classify_board_conversation").description).toMatch(/cleanup handoff/i);
   expect(tool("classify_board_conversation").description).toMatch(/without verified evidence or receipts/i);
+});
+
+test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent-note while preserving person-notes, legacy notes, same-evidence notes, and clarifications", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board-pd1-"));
+  dirs.push(dir);
+  const prefs = new PreferenceStore(join(dir, "scope.json"));
+  const notes = new NoteStore(join(dir, "notes.json"));
+  prefs.change(scope => { scope.projects = ["easydocs"]; scope.coordinator = "coord"; });
+
+  const ev1 = excerpt({ epoch: "1", entries: [{ seqEnd: 1, item: { type: "assistant_message", text: "#308 H1 확인을 부탁드립니다." } }] });
+  const ev2 = excerpt({
+    epoch: "1",
+    entries: [
+      { seqEnd: 1, item: { type: "assistant_message", text: "#308 H1 확인을 부탁드립니다." } },
+      { seqEnd: 2, item: { type: "assistant_message", text: "#308 cf6f661 원격 main 통합·최종검증·GitHub COMPLETED 확인." } },
+    ],
+  });
+  const ev3 = excerpt({
+    epoch: "1",
+    entries: [
+      { seqEnd: 1, item: { type: "assistant_message", text: "#308 H1 확인을 부탁드립니다." } },
+      { seqEnd: 2, item: { type: "assistant_message", text: "#308 cf6f661 원격 main 통합·최종검증·GitHub COMPLETED 확인." } },
+      { seqEnd: 3, item: { type: "assistant_message", text: "후속 확인 사항이 새로 생겼습니다." } },
+    ],
+  });
+
+  const baseRow = (id: string, ev: typeof ev1): SessionRow => ({
+    id,
+    title: "#308 구현",
+    projectId: "easydocs",
+    projectTitle: "EasyDocs",
+    workspaceId: "wks_308",
+    workspaceTitle: "EasyDocs #308",
+    model: null,
+    status: "idle",
+    lane: "idle",
+    detail: "다음 요청 대기",
+    evidenceId: ev.id,
+  });
+
+  const evaluate = (row: SessionRow, ev: typeof ev1) => {
+    const scope = prefs.read();
+    const note = notes.visible(new Set([row.id]))[row.id];
+    const judgment = scope.judgments[row.id];
+    Object.assign(row, classify(ev, row, judgment?.projectId === row.projectId ? judgment : undefined), { evidenceId: ev.id });
+    decorateDecision(row, note, scope, ev);
+    return { row, note, lane: displayLane(row, note), count: decisionCount({ sessions: [row], notes: note ? { [row.id]: note } : {} }) };
+  };
+
+  // 1. Worker posts an agent-note (question) bound to ev1 -> active before coordinator idle judgment.
+  expect(recordReport(notes, "w308", { kind: "question", text: "#308 H1 확인해 주세요" }, ev1.id).isError).not.toBe(true);
+  const before = evaluate(baseRow("w308", ev1), ev1);
+  expect(before.row.agentNoteSuperseded).toBeUndefined();
+  expect(before.row.decision).toMatchObject({ source: "agent-note", question: "#308 H1 확인해 주세요" });
+  expect(before.lane).toBe("human");
+  expect(before.count).toBe(1);
+  expect(sessionClarificationCard(before.row, before.note)).not.toBeNull();
+
+  // 2. Same evidenceId with coordinator idle judgment does NOT supersede the agent-note.
+  prefs.change(s => { s.judgments.w308 = { projectId: "easydocs", evidenceId: ev1.id, kind: "idle", text: "동일 근거 대기" }; });
+  const sameEv = evaluate(baseRow("w308", ev1), ev1);
+  expect(sameEv.row.agentNoteSuperseded).toBeUndefined();
+  expect(sameEv.lane).toBe("human");
+  expect(sameEv.count).toBe(1);
+
+  // 3. Newer evidence ev2 with coordinator idle judgment supersedes the earlier ev1 agent-note!
+  prefs.change(s => { s.judgments.w308 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "#308 cf6f661 통합 완료" }; });
+  const after = evaluate(baseRow("w308", ev2), ev2);
+  expect(after.row.agentNoteSuperseded).toBe(true);
+  expect(after.row.decision).toBeUndefined();
+  expect(after.lane).toBe("idle");
+  expect(after.count).toBe(0);
+  expect(sessionClarificationCard(after.row, after.note)).toBeNull();
+  // Revision is preserved in notes.json so NoteEditor edits will not conflict.
+  expect(after.note?.revision).toBe(1);
+
+  // 4. Also supersedes earlier agent-note with kind: "review" (exact #308 shape).
+  expect(recordReport(notes, "w308r", { kind: "review", text: "#308 H1 확인" }, ev1.id).isError).not.toBe(true);
+  prefs.change(s => { s.judgments.w308r = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "#308 통합 완료" }; });
+  const afterReview = evaluate(baseRow("w308r", ev2), ev2);
+  expect(afterReview.row.agentNoteSuperseded).toBe(true);
+  expect(afterReview.lane).toBe("idle");
+
+  // 5. Subsequent new turn ev3 invalidates ev2 idle judgment -> note is no longer superseded.
+  const nextTurn = evaluate(baseRow("w308", ev3), ev3);
+  expect(nextTurn.row.agentNoteSuperseded).toBeUndefined();
+  expect(nextTurn.lane).toBe("human");
+  expect(nextTurn.count).toBe(1);
+
+  // 6. Human-written person-note is NEVER superseded by coordinator idle judgment.
+  notes.update({ sessionId: "person1", kind: "question", text: "사람이 직접 적은 확인", evidenceId: ev1.id, expectedRevision: 0 }, "person");
+  prefs.change(s => { s.judgments.person1 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "정리됨" }; });
+  const personRes = evaluate(baseRow("person1", ev2), ev2);
+  expect(personRes.row.agentNoteSuperseded).toBeUndefined();
+  expect(personRes.row.decision).toMatchObject({ source: "person-note", question: "사람이 직접 적은 확인" });
+  expect(personRes.lane).toBe("human");
+  expect(personRes.count).toBe(1);
+
+  // 7. Legacy agent-note without evidenceId stays active (fail-closed).
+  expect(recordReport(notes, "legacy1", { kind: "question", text: "레거시 보고" }).isError).not.toBe(true);
+  prefs.change(s => { s.judgments.legacy1 = { projectId: "easydocs", evidenceId: ev2.id, kind: "idle", text: "정리됨" }; });
+  const legacyRes = evaluate(baseRow("legacy1", ev2), ev2);
+  expect(legacyRes.row.agentNoteSuperseded).toBeUndefined();
+  expect(legacyRes.lane).toBe("human");
+  expect(legacyRes.count).toBe(1);
+
+  // 8. Clarification explanation turn classified idle still restores the original agent-note decision!
+  const clarifyMessageId = "11111111-1111-4111-8111-111111111111";
+  const clarifyEv = excerpt({
+    epoch: "1",
+    entries: [
+      { seqEnd: 1, item: { type: "assistant_message", text: "#308 H1 확인을 부탁드립니다." } },
+      { seqEnd: 2, item: { type: "user_message", text: "[Coordinator Board · 추가 질문]\n어느 버튼인가요?", messageId: clarifyMessageId } },
+      { seqEnd: 3, item: { type: "assistant_message", text: "2열 하단 사진 교체 버튼입니다." } },
+    ],
+  });
+  expect(recordReport(notes, "clarify1", { kind: "question", text: "#308 H1 확인해 주세요" }, ev1.id).isError).not.toBe(true);
+  const initialClarify = evaluate(baseRow("clarify1", ev1), ev1);
+  const clarifyCard = {
+    kind: "session" as const,
+    projectId: "easydocs",
+    sessionId: "clarify1",
+    version: initialClarify.row.decision!.version,
+  };
+  prefs.change(s => {
+    s.judgments.clarify1 = { projectId: "easydocs", evidenceId: clarifyEv.id, kind: "idle", text: "설명 응답" };
+    s.clarifications[clarifyMessageId] = {
+      cardKey: JSON.stringify(["session", "easydocs", "clarify1", initialClarify.row.decision!.version]),
+      messageId: clarifyMessageId,
+      recipientId: "clarify1",
+      question: "어느 버튼인가요?",
+      at: "2026-11-26T05:00:00Z",
+      status: "sent",
+      card: clarifyCard,
+      fingerprint: "f".repeat(64),
+      bodyHash: "b".repeat(64),
+      sourceSessionId: "clarify1",
+      savedDecision: initialClarify.row.decision!,
+      noteRevision: 1,
+      sourceEvidenceId: ev1.id,
+    };
+  });
+  const clarifyRow = baseRow("clarify1", clarifyEv);
+  const clarifyScope = prefs.read();
+  const clarifyNote: Note | undefined = notes.visible(new Set(["clarify1"])).clarify1;
+  Object.assign(clarifyRow, classify(clarifyEv, clarifyRow, clarifyScope.judgments.clarify1), { evidenceId: clarifyEv.id });
+  expect(isSupersededAgentNote(clarifyRow, clarifyNote, clarifyScope)).toBe(true);
+  decorateDecision(clarifyRow, clarifyNote, clarifyScope, clarifyEv);
+  restoreClarifiedDecision(clarifyRow, clarifyNote, clarifyScope, clarifyEv);
+  expect(clarifyRow.agentNoteSuperseded).toBeUndefined();
+  expect(clarifyRow.lane).toBe("human");
+  expect(clarifyRow.decision).toEqual(initialClarify.row.decision);
+  expect(displayLane(clarifyRow, clarifyNote)).toBe("human");
 });

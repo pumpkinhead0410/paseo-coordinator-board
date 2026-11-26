@@ -48,7 +48,7 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
             ...(r.workspaceId ? {workspaceId:r.workspaceId} : {}), workspaceTitle:r.workspaceTitle, title:r.title,
             status:r.status, activityAt:r.activityAt,
             ...(matchedJudgment ? {judgment:{kind:matchedJudgment.kind, evidenceId:matchedJudgment.evidenceId}} : {}),
-            ...(activeNote && activeNote.kind !== "clear" ? {note:{kind:activeNote.kind, origin:activeNote.origin ?? "person"}} : {}),
+            ...(activeNote && activeNote.kind !== "clear" ? {note:{kind:activeNote.kind, origin:activeNote.origin ?? "person", ...(activeNote.evidenceId ? {evidenceId:activeNote.evidenceId} : {})}} : {}),
             ...(needsRecommendation ? {needsRecommendation:true}:{}),
             ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? {factCandidate:true} : {}) });
         }

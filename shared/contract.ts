@@ -29,6 +29,7 @@ const session = z.object({
   evidenceId: z.string().optional(),
   decision: decisionSchema.optional(),
   decisionAnswered: z.boolean().optional(),
+  agentNoteSuperseded: z.boolean().optional(),
   boardFact: factSchema.extend({ current: z.boolean() }).optional(),
   nativePending: z.boolean().optional(),
   permissionVersion: z.string().optional(),
