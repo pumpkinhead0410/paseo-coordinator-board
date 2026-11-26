@@ -84,6 +84,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 3차 `14272eb7` 지적 2건 반영)**:
   1. `unverifiedIdleReason`이 `COMPLETED`/닫힘 근거를 발췌 원문(`last.text`) 자체에서 요구하도록 강화하고(코디네이터 입력 문구만으로 우회 불가), 검증·종료의 부정·실패·미확인 표현(“통과하지 못했습니다”, “종료 여부는 확인하지 못했습니다”)을 `negatedOutcomePattern`과 확정 종료 정규식으로 차단했습니다(`server/coordinator.ts`).
   2. 해소된 `agent-note` 판본을 `scope.judgments`에서 분리해 독립 맵 `scope.supersededAgentNotes`에 보관하도록 변경해, 같은 세션에서 별도 작업을 `review`로 분류해도 이전 해소 질문이 복귀하지 않으면서 새 보고(판본 증가)와 프로젝트 해제·세션 재연결 정리가 정확히 유지되도록 했습니다(`server/preferences.ts`, `server/decisions.ts`, `server/coordinator.ts`, `index.server.ts`, `server/session-links.ts`).
+- **2026-11-27 (독립 의도 리뷰 4차 `14272eb7` 지적 2건 반영)**:
+  1. `completedClosurePattern`과 `confirmedNotPlannedPattern`에서 PR 병합(`MERGED`), 종료 사유 없는 `CLOSED`, 세션 종료 문구를 제외하고 이슈의 명시적 `COMPLETED` / `NOT_PLANNED` 종료 근거만 허용하도록 강화했습니다(`server/coordinator.ts`).
+  2. `productOutcomeClauses`로 정리 인계 전용 문장(“작업 폴더 정리는 사용 종료를 확인하지 못해 보류합니다” 등)을 제품 증빙 문장과 분리해 평가하도록 수정해, 정리 보류·사용 종료 미확인 문구가 확인된 통합 결과의 `idle` 갱신을 오차단하지 않도록 했습니다(`server/coordinator.ts`).
 
 ## Acceptance criteria
 

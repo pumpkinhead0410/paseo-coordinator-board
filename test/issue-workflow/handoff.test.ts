@@ -224,6 +224,24 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/완료 영수증·검증 근거/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
+  // PR MERGED, reason-less GitHub CLOSED, or generic "build completed" (without explicit COMPLETED close reason) is rejected.
+  for (const [ts, text] of [
+    ["2026-11-26T05:58:30Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub MERGED 확인."],
+    ["2026-11-26T05:58:45Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub CLOSED 확인."],
+    ["2026-11-26T05:58:50Z", "cf6f661 merged into main, tests passed, build completed."],
+  ] as const) {
+    w308.updatedAt = ts;
+    timelines.get("w308")!.push(text);
+    const noReasonExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+    await expect(run("classify_board_conversation", {
+      sessionId: "w308",
+      evidenceId: noReasonExcerpt.evidenceId,
+      kind: "idle",
+      text: "#308 cf6f661 원격 main 통합 완료",
+    })).rejects.toThrow(/완료 영수증·검증 근거/);
+    expect(prefs.read().judgments.w308.kind).toBe("review");
+  }
+
   // 2. Integration finishes while w308 is running /done -> fail-closed with actionable running message.
   w308.status = "running";
   await expect(run("classify_board_conversation", {
@@ -245,10 +263,10 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + separate cleanup hold (보류 must NOT block verified integration!).
+  // 3. Worker finishes /done with integration receipt + separate cleanup hold (including "사용 종료를 확인하지 못해 보류"!).
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub COMPLETED 확인. 작업 폴더 정리는 14일 보호 기준으로 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub COMPLETED 확인. 작업 폴더 정리는 사용 종료를 확인하지 못해 보류합니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -310,16 +328,21 @@ test("#303 NOT_PLANNED (confirmed vs OPEN proposal) and #305 staged human decisi
     text: "#303 NOT_PLANNED 종료",
   })).rejects.toThrow(/NOT_PLANNED/);
 
-  // Unconfirmed NOT_PLANNED closure ("종료 여부는 확인하지 못했습니다") is also rejected fail-closed!
-  w303.updatedAt = "2026-11-26T05:51:00Z";
-  timelines.get("w303")!.push("조사를 중단했으나 GitHub NOT_PLANNED 종료 여부는 확인하지 못했습니다.");
-  const unconfirmedNotPlanned = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
-  await expect(run("classify_board_conversation", {
-    sessionId: "w303",
-    evidenceId: unconfirmedNotPlanned.evidenceId,
-    kind: "idle",
-    text: "#303 NOT_PLANNED 종료",
-  })).rejects.toThrow(/NOT_PLANNED/);
+  // Unconfirmed NOT_PLANNED closure ("종료 여부는 확인하지 못했습니다") and session-only exit ("조사를 중단하고 조사 세션을 종료했습니다") are rejected fail-closed even without NOT_PLANNED in inputText!
+  for (const [ts, text, inputText] of [
+    ["2026-11-26T05:51:00Z", "조사를 중단했으나 GitHub NOT_PLANNED 종료 여부는 확인하지 못했습니다.", "#303 NOT_PLANNED 종료"],
+    ["2026-11-26T05:52:00Z", "조사를 중단하고 조사 세션을 종료했습니다.", "#303 종결"],
+  ] as const) {
+    w303.updatedAt = ts;
+    timelines.get("w303")!.push(text);
+    const badNotPlanned = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
+    await expect(run("classify_board_conversation", {
+      sessionId: "w303",
+      evidenceId: badNotPlanned.evidenceId,
+      kind: "idle",
+      text: inputText,
+    })).rejects.toThrow(/NOT_PLANNED/);
+  }
 
   const e305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
   await run("classify_board_conversation", {
