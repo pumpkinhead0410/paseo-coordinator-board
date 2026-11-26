@@ -38,7 +38,11 @@ async function openBoard() {
   attachCoordinatorTools({ addHook(_, hook) { onOpen = hook; } }, prefs, new ConversationReader(), createOperations(prefs, dir).tools);
   const opened = await onOpen({ request: { purpose: "interactive", agentId: "coord", tools: [] } });
   const tool = name => opened.tools.find(t => t.name === name);
-  const read = async (input = {}) => JSON.parse((await tool("read_board_conversation").execute(input, { paseo: sdk, agent: { id: "coord" } })).text);
+  const readTool = tool("read_board_conversation");
+  const read = async (input = {}) => {
+    const result = await readTool.execute(readTool.input.parse(input), { paseo: sdk, agent: { id: "coord" } });
+    return JSON.parse(result.text);
+  };
   return { prefs, agents, messages, sdk, timelineReads, tool, read };
 }
 
@@ -61,7 +65,6 @@ test("다음 대화에 노출되는 조회 도구와 배정 도구가 상태 근
   expect(read).toContain("activityAt");
   expect(read).toContain("time of this lookup");
   expect(read).toContain('{"sessionId":');
-  expect(read).toMatch(/top.level/i);
   expect(read).toMatch(/unknown|unconfirmed/i);
   const assign = tool("assign_board_worker").description;
   expect(assign).toMatch(/receipt/i);
@@ -111,4 +114,28 @@ test("빈 발췌·재개·목록 오류·관리 해제에서 옛 근거를 재�
   expect(timelineReads).toEqual(["A"]);
   sdk.agents.list = async () => { throw new Error("호스트 조회 오류"); };
   await expect(read()).rejects.toThrow("호스트 조회 오류");
+});
+
+test("직접·중첩·일치하는 두 ID는 동일한 작업자의 최신 발췌를 반환한다", async () => {
+  const { agents: [, worker], messages, read, prefs, timelineReads } = await openBoard();
+  worker.status = "idle";
+  messages.set(worker.id, "검증 완료. 배포 승인 대기 중입니다.");
+  const target = { sessionId: worker.id };
+  const direct = await read(target);
+  expect(direct).toMatchObject({ sessionId: worker.id, turns: [{ text: messages.get(worker.id) }] });
+  expect(await read({ arguments: target })).toEqual(direct);
+  expect(await read({ ...target, arguments: target })).toEqual(direct);
+  expect(await read({ ...target, arguments: {} })).toEqual(direct);
+  expect(await read({ arguments: {} })).toEqual(await read({}));
+
+  prefs.change(scope => { scope.projects = ["control"]; });
+  await expect(read({ arguments: target })).rejects.toThrow("관리 대상");
+  expect(timelineReads).toEqual(["A", "A", "A", "A"]);
+});
+
+test("두 위치의 ID가 다르면 관리 목록이나 대화를 읽기 전에 거절한다", async () => {
+  const { read, sdk, timelineReads } = await openBoard();
+  sdk.agents.list = async () => { throw new Error("예상하지 않은 목록 조회"); };
+  await expect(read({ sessionId: "A", arguments: { sessionId: "B" } })).rejects.toThrow(/sessionId/);
+  expect(timelineReads).toBeEmpty();
 });
