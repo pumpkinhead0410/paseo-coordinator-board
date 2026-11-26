@@ -17,6 +17,7 @@ const session = z.object({
   title: z.string(),
   projectId: z.string(),
   projectTitle: z.string(),
+  workspaceId: z.string().optional(),
   workspaceTitle: z.string(),
   workspacePull: workspacePullSchema.optional(),
   sourceProjectId: z.string().optional(),

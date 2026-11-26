@@ -43,7 +43,7 @@ test("각 목록의 모든 페이지를 읽고 이름이 같은 프로젝트와 
   const rows = await discoverSessions(sdk);
   assert.deepEqual(calls.sort(), ["agent:first", "agent:next-a", "workspace:first", "workspace:next-w"]);
   assert.equal(rows.length, 2);
-  assert.deepEqual(rows[0], { id: "a", title: "새 제목", projectId: "repo", projectTitle: "내 프로젝트", workspaceTitle: "작업 폴더", model: "observed", provider: null, status: "idle", activityAt: undefined, lane: "idle", detail: "다음 요청 대기" });
+  assert.deepEqual(rows[0], { id: "a", title: "새 제목", projectId: "repo", projectTitle: "내 프로젝트", workspaceId: "w", workspaceTitle: "작업 폴더", model: "observed", provider: null, status: "idle", activityAt: undefined, lane: "idle", detail: "다음 요청 대기" });
   assert.equal(rows[1].projectId, "other");
   assert.equal(rows[1].workspaceTitle, "기본 작업 폴더");
   assert.equal(rows[1].model, null);
