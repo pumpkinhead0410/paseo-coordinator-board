@@ -1246,6 +1246,71 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   expect(prefs.read().judgments.w_untitled.kind).toBe("idle");
   expect(prefs.read().judgments.w_untitled.verificationPending).toBeUndefined();
   expect(prefs.read().judgments.w_untitled.verificationTarget).toBeUndefined();
+
+  // 11. Multi-issue verification waits (`#308 및 #999`) MUST be rejected at `review` time, AND legacy multi-issue `verificationTarget` MUST NOT be cleared by a single receipt!
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: untitledEv4.evidenceId,
+    kind: "review",
+    text: "#308 및 #999 최종 검증 대기",
+  })).rejects.toThrow(/세션당 하나의 대상 이슈만 고정할 수 있습니다/);
+  // Simulate a legacy stored judgment with two pinned issues `[308, 999]` and confirm single `#999` receipt cannot clear it!
+  prefs.change(scope => {
+    scope.judgments.w_untitled = {
+      projectId: "easydocs",
+      evidenceId: untitledEv4.evidenceId,
+      kind: "review",
+      reviewKind: "verification",
+      verificationPending: true,
+      verificationTarget: { repo: "acme/easydocs", issues: [308, 999] },
+      text: "#308 및 #999 최종 검증 대기",
+    };
+  });
+  wUntitled.updatedAt = "2026-11-26T07:24:00Z";
+  timelines.get("w_untitled")!.push("#999 999aaaa 원격 main 통합 완료. #308은 아직 검증 대기입니다.");
+  const multiEv = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: multiEv.evidenceId,
+    kind: "idle",
+    text: "#999 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 999,
+      commit: "999aaaa",
+      verifiedCommit: "999aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/복수\(#308, #999\)로 묶여 있어/);
+
+  // 12. Out-of-range issue number (`#2147483648`) MUST NOT corrupt `scope.json` so subsequent `PreferenceStore.read()` always succeeds!
+  const wOverflow = {
+    id: "w_overflow",
+    title: "범위 확인 세션",
+    status: "idle",
+    projectId: "easydocs",
+    workspaceId: "wks_office",
+    updatedAt: "2026-11-26T07:25:00Z",
+    pendingPermissions: [],
+    labels: { coordinatorBoardParent: "coord" },
+  };
+  agents.push(wOverflow);
+  timelines.set("w_overflow", ["결과 확인을 기다립니다."]);
+  const overflowEv = JSON.parse(await run("read_board_conversation", { sessionId: "w_overflow" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_overflow",
+    evidenceId: overflowEv.evidenceId,
+    kind: "review",
+    text: "#2147483648 최종 검증 대기",
+  });
+  expect(prefs.read().judgments.w_overflow).toMatchObject({
+    kind: "review",
+    reviewKind: "verification",
+    verificationPending: true,
+    verificationTarget: { repo: "acme/easydocs", issues: [] },
+  });
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

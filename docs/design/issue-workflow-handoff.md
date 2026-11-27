@@ -162,6 +162,9 @@ await classify_board_conversation({
   2. **일반 검토(`general`)와 통합·검증 대기(`verification`)의 명시적 구분(`reviewKind`)**: `classify_board_conversation`의 `review` 판단에 선택 필드 `reviewKind: "general" | "verification"`을 도입했습니다. 이슈가 연결되거나(`anchoredIssues`) 통합·검증 맥락이 있는 세션의 `review`는 자동으로 `verification`(`verificationPending: true`)으로 기록되고 `general` 강등이 거절되는 반면, 이슈·통합과 무관한 일반 검토(예: 회의실 예약 시간 대조)는 `general`로 구분돼 최신 발췌 확인만으로 GitHub 영수증 없이 `idle` 해제가 가능합니다.
 - **2026-11-27 (독립 의도 리뷰 24차 `bbcdb49` 지적 1건 반영 — 검증 대기 대상 저장소·이슈 고정)**:
   - `server/preferences.ts`·`server/coordinator.ts`에 서버 관리 `verificationTarget?: { repo?, issues }`를 추가해 검증 대기 생성 시점의 대상 저장소·이슈를 함께 고정 저장하고, 후속 `question`·`review`가 기존 `verificationTarget`을 덮어쓰지 못하게 했습니다. `idle` 검증 시 `verificationTarget`의 저장소·이슈와 일치하지 않는 타 이슈 영수증(예: `#308` 검증 대기 중 `#999` 질문·완료 영수증)은 fail-closed 거절됩니다.
+- **2026-11-27 (독립 의도 리뷰 25차 `06c1c23` 지적 2건 반영)**:
+  1. **단일 대상 이슈 제한**: `server/coordinator.ts`에서 검증 대기(`review`) 생성 시 복수 대상 이슈(예: `#308 및 #999`)를 동시에 고정하려는 호출을 fail-closed 거절하고, 레거시/직접 `idle` 경로에서도 복수 대상 이슈가 묶여 있으면 단일 영수증만으로 해제하지 못하도록 차단했습니다.
+  2. **이슈 번호 범위 통일 및 쓰기 전 스키마 검증**: `server/preferences.ts`에 `MAX_ISSUE_NUMBER = 2147483647`을 공유 상수로 두고 `extractAnchoredIssues`에 같은 상한을 적용했으며, `verificationTargetSchema.parse` 및 `PreferenceStore.change`의 `schema.parse` 쓰기 전 검증을 추가해 범위 밖 번호(`#2147483648` 등)로 설정 파일이 손상되지 않도록 보장했습니다.
 
 ## Acceptance criteria
 

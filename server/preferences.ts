@@ -11,6 +11,7 @@ import { replyDetails } from "../shared/reply-history";
 import { factSchema } from "../shared/board-facts";
 
 const commitHash = z.string().trim().regex(/^[0-9a-f]{7,40}$/i);
+export const MAX_ISSUE_NUMBER = 2147483647;
 const submittedVerificationSchema = z.object({
   source: z.literal("ci"),
   status: z.literal("passed"),
@@ -27,7 +28,7 @@ const storedVerificationSchema = z.object({
 const completedReceiptSchema = z.object({
   kind: z.literal("completed"),
   repo: repositorySlug,
-  issue: z.number().int().positive().max(2147483647),
+  issue: z.number().int().positive().max(MAX_ISSUE_NUMBER),
   commit: commitHash,
   verifiedCommit: commitHash,
   verification: submittedVerificationSchema,
@@ -40,7 +41,7 @@ const storedCompletedReceiptSchema = completedReceiptSchema.extend({
 const notPlannedReceiptSchema = z.object({
   kind: z.literal("not_planned"),
   repo: repositorySlug,
-  issue: z.number().int().positive().max(2147483647),
+  issue: z.number().int().positive().max(MAX_ISSUE_NUMBER),
   closeReason: z.literal("NOT_PLANNED"),
   stopReason: z.string().trim().min(1).max(300),
   cleanupHandoff: z.string().trim().min(1).max(300).optional(),
@@ -70,7 +71,7 @@ export type CompletionReceipt = z.infer<typeof completionReceipt>;
 export const reviewKindSchema = z.enum(["general", "verification"]);
 export const verificationTargetSchema = z.object({
   repo: repositorySlug.optional(),
-  issues: z.array(z.number().int().positive().max(2147483647)).max(20),
+  issues: z.array(z.number().int().positive().max(MAX_ISSUE_NUMBER)).max(20),
 });
 export type VerificationTarget = z.infer<typeof verificationTargetSchema>;
 export const judgment = z.object({
@@ -165,10 +166,11 @@ export class PreferenceStore {
   change(edit: (value: Preferences) => void) {
     const value = this.read();
     edit(value);
+    const validated = schema.parse(value);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const temp = this.path + "." + randomUUID();
     try {
-      writeFileSync(temp, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+      writeFileSync(temp, JSON.stringify(validated), { flag: "wx", mode: 0o600 });
       renameSync(temp, this.path);
     } finally { rmSync(temp, { force: true }); }
   }
