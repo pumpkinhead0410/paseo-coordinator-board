@@ -13,7 +13,8 @@ const pendingIntegrationOrVerificationPattern = /(?:통합|병합|머지|검증|
 const negatedOutcomePattern = /(?:통과|검증|확인|완료|닫혔|닫힘|닫히|종료|반영|통합|포함)(?:을|를|은|는|이|가|지|\s*여부(?:는|를|가)?)?\s*(?:하지\s*못|못\s*했|못함|하지\s*않|않았|되지\s*않|안\s*됨|실패|미확인|미완료|불가)|(?:검증|테스트|시험|CI)\s*(?:이|가|은|는)?\s*실패|\b(?:did\s+not\s+(?:pass|verify|confirm|close)|not\s+(?:confirmed|closed|verified|passed)|unconfirmed|failed\s+to\s+(?:pass|verify|confirm|close))\b/i;
 const commitShaPattern = /\b[0-9a-f]{7,40}\b/i;
 const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:main|master)\s*통합\s*커밋|통합\s*커밋|\bmerged\s+into\s+(?:origin\/)?(?:main|master)\b/i;
-const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|CI|D155|회귀|단위\s*시험|검증\s*자료|manifest\.json|영수증|SHA-256).{0,32}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
+const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|\bCI\b|D155|회귀|단위\s*시험|테스트|시험)(?:\s*(?:결과|모두|전체|항목))?.{0,24}(?:통과|성공|일치|PASS|0\s*fail|오류\s*없|이상\s*없)|(?:검증\s*자료|manifest\.json|영수증|SHA-256).{0,24}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
+const pendingClosureOrCheckPattern = /(?:기다(?:리|립|림|렸|려)|대기(?:하|중|\s*중)?|조회\s*중|확인\s*중|진행\s*중|처리\s*중|예정|남았|남아|여부(?:를|는|가)?\s*(?:조회|확인|대기|기다|점검)|\b(?:waiting\s+for|pending|checking|in\s+progress|expected|to\s+be\s+closed)\b)/i;
 const nonIssueStatusPattern = /(?:GitHub\s+Actions|\bActions\b|workflow|워크플로(?:우)?|\bchecks?\b|체크|\bjobs?\b|\bpipeline\b|파이프라인|\b(?:pull\s*request|PR)\b(?:\s*#\d+)?|\/pull\/\d+|\bCI\b(?:\s*(?:실행|상태|워크플로|체크|잡))?|빌드|\bbuild\b|배포|\bdeployment\b|세션|\bsession\b)/i;
 const issueRefToken = String.raw`(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)`;
 const issueRefList = String.raw`${issueRefToken}(?:\s*(?:·|,|과|와|및)\s*${issueRefToken})*`;
@@ -85,12 +86,15 @@ function extractClosureClaims(clauses: string[], pattern: RegExp): ClosureClaim[
     for (const match of clause.matchAll(pattern)) {
       const start = match.index ?? 0;
       const matched = match[0];
+      const hasExplicitIssueSubject = /^(?:GitHub|이슈|issue|stateReason|종료\s*사유)/i.test(matched);
       const rawPrefix = clause.slice(Math.max(0, start - 24), start);
-      const localPrefix = rawPrefix.replace(/^.*(?:별개로|대신|외에|말고|제외하고|이고|이나|이며|및|,|;|·)\s*/i, "");
+      const localPrefix = hasExplicitIssueSubject
+        ? ""
+        : rawPrefix.replace(/^.*(?:별개로|대신|외에|말고|제외하고|이고|이나|이며|및|와|과|후|뒤|,|;|·)\s*/i, "");
       const rawSuffix = clause.slice(start + matched.length, start + matched.length + 28);
       const localSuffix = rawSuffix.split(/(?:(?:와|과)\s+|및\s+|하고\s+|했고\s+|했지만\s+|했으나\s+)/)[0] ?? "";
       if (nonIssueStatusPattern.test(`${localPrefix}${matched}`)) continue;
-      if (negatedOutcomePattern.test(`${matched}${localSuffix}`)) continue;
+      if (negatedOutcomePattern.test(`${matched}${localSuffix}`) || pendingClosureOrCheckPattern.test(`${matched}${localSuffix}`)) continue;
       const refs = extractRepoIssueRefs(matched);
       claims.push(refs);
     }
@@ -183,7 +187,9 @@ export function unverifiedIdleReason(
   }
 
   if (mentionsNotPlanned) {
-    const hasProblem = clauses.some(c => openOrProposalPattern.test(c) || negatedOutcomePattern.test(c) || /[?？]/.test(c));
+    const hasProblem = clauses.some(
+      c => openOrProposalPattern.test(c) || negatedOutcomePattern.test(c) || pendingClosureOrCheckPattern.test(c) || /[?？]/.test(c),
+    );
     const notPlannedClaims = extractClosureClaims(clauses, notPlannedClosureMatchPattern);
     const hasConfirmed = closureCoversTargets(notPlannedClaims, targetIssues, last.text, expectedRepo);
     if (hasProblem || !hasConfirmed) {
@@ -194,9 +200,13 @@ export function unverifiedIdleReason(
     }
     return null;
   }
-  const hasNegatedProductOutcome = clauses.some(c => negatedOutcomePattern.test(c) || openOrProposalPattern.test(c));
+  const hasNegatedProductOutcome = clauses.some(
+    c => negatedOutcomePattern.test(c) || openOrProposalPattern.test(c) || pendingClosureOrCheckPattern.test(c),
+  );
   const hasMainCommit = clauses.some(c => commitShaPattern.test(c) && mainIntegrationTargetPattern.test(c) && !negatedOutcomePattern.test(c));
-  const hasVerification = clauses.some(c => verificationReceiptPattern.test(c) && !negatedOutcomePattern.test(c));
+  const hasVerification = clauses.some(
+    c => verificationReceiptPattern.test(c) && !negatedOutcomePattern.test(c) && !pendingClosureOrCheckPattern.test(c),
+  );
   const completedClaims = extractClosureClaims(clauses, completedClosureMatchPattern);
   const hasClosure = closureCoversTargets(completedClaims, targetIssues, last.text, expectedRepo);
   if (pendingInSource || hasNegatedProductOutcome || !hasMainCommit || !hasVerification || !hasClosure) {

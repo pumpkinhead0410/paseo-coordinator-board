@@ -96,6 +96,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 7차 `14272eb7` 지적 2건 반영)**:
   1. `extractClosureClaims`가 절 전체가 아니라 종료 구문 자체에 직접 결합된 이슈·저장소 참조만 추출하도록 변경해, 같은 절의 `#308과 별개로 GitHub 이슈 #999는 COMPLETED로 닫혔습니다`가 `#308` 완료로 오인되지 않게 했습니다(`server/coordinator.ts`).
   2. `nonIssueStatusPattern` 검사를 종료 구문 직전·내부로 한정해 `GitHub #308 COMPLETED 종료와 CI 통과를 확인했습니다`를 정상 수락하고, 세션·워크스페이스 제목의 구조적 대상 이슈를 산문 앵커보다 우선하며 `stripReferenceMentions`로 `참고 이슈 #999`가 필수 종료 대상에 섞이지 않게 분리했습니다(`server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 8차 `14272eb7` 지적 2건 반영)**:
+  1. `pendingClosureOrCheckPattern`을 추가해 종료 대기(“COMPLETED 종료를 기다립니다”)와 조회 중(“COMPLETED 여부를 조회 중입니다”)을 거절하고, `verificationReceiptPattern`이 CI/검증 실행에 대해 단순 로그 확인(“CI 로그를 확인했습니다”)이 아니라 실제 통과·성공 결과나 영수증을 요구하도록 강화했습니다(`server/coordinator.ts`).
+  2. `extractClosureClaims`가 `GitHub`/`이슈` 등 명시적 이슈 주체가 있는 종료 구문에서는 앞선 `CI 통과와 `를 비-이슈 주체로 섞지 않도록 수정해 문장 순서와 무관하게 `CI 통과와 GitHub #308 COMPLETED 종료를 확인했습니다`를 수락하도록 했습니다(`server/coordinator.ts`).
 
 ## Acceptance criteria
 

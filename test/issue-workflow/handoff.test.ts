@@ -236,6 +236,9 @@ test("#308 reproduction: running session rejects stale classification with actio
     ["2026-11-26T05:58:57Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. https://github.com/other/unrelated/issues/308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
     ["2026-11-26T05:58:58Z", "#999 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999 COMPLETED 확인.", "#999 통합 완료"],
     ["2026-11-26T05:58:59Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. #308과 별개로 GitHub 이슈 #999는 COMPLETED로 닫혔습니다.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:59:00Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub #308 COMPLETED 종료를 기다립니다.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:59:01Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub #308 COMPLETED 여부를 조회 중입니다.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:59:02Z", "#308 cf6f661 원격 main 반영·CI 로그를 확인했습니다·GitHub #308 COMPLETED 종료 확인.", "#308 cf6f661 원격 main 통합 완료"],
   ] as const) {
     w308.updatedAt = ts;
     timelines.get("w308")!.push(text);
@@ -270,10 +273,10 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + CI pass in same clause as COMPLETED + same-sentence cleanup hold with modifier!
+  // 3. Worker finishes /done with integration receipt + CI pass BEFORE COMPLETED in same clause + same-sentence cleanup hold with modifier!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. GitHub #308 COMPLETED 종료와 CI 통과를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
