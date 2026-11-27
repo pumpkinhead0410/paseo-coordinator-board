@@ -41,6 +41,7 @@ export function quotaEvidence(page: Timeline) {
     if (turnId && turnId !== end.turnId) break;
     if (item.type === "user_message") {
       if (match && item.text.includes(match[0])) return;
+      if (match && !incidentTurn && item.clientMessageId) incidentTurn = "acp:" + item.clientMessageId;
       break;
     }
     if (item.type === "tool_call" && item.agentMessage) {

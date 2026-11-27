@@ -139,3 +139,18 @@ test("Antigravity history replay keeps the observed input identity and relative 
   expect(next).toContain("2h49m33s");
   expect(next).not.toContain("예상");
 });
+
+test("a replayed direct ACP request keeps its client message identity", async () => {
+  const f = fixture();
+  const input = {seqEnd:0, item:{type:"user_message", text:"continue", clientMessageId:"request"}};
+  f.page.entries.unshift(input);
+  const end = f.page.entries.at(-1);
+  end.turnId = "acp:request";
+  expect(await f.poll()).not.toBeNull();
+  delete end.turnId;
+  end.item.messageId = "replayed chunk";
+  end.timestamp = "2026-11-27T09:11:22Z";
+  expect(await f.poll()).toBeNull();
+  input.item.clientMessageId = "new request";
+  expect(await f.poll()).not.toBeNull();
+});
