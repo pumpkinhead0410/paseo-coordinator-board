@@ -279,16 +279,25 @@ export async function verifyIdleClassification(
   if (!commitOutcome.onMain) {
     return `통합 커밋(${receipt.commit})이 대상 저장소(${receipt.repo})의 main 브랜치에 반영된 것을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
   }
-  const hasClosingCommitLink =
-    issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0
-      ? issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))
-      : undefined;
-  if (hasClosingCommitLink === false) {
-    return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 종료 커밋과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
-  }
-  const hasCommitIssueLink = !!commitOutcome.issues?.includes(receipt.issue);
-  if (hasClosingCommitLink === undefined && !hasCommitIssueLink) {
-    return `통합 커밋(${receipt.commit})과 대상 이슈(${receipt.repo}#${receipt.issue})의 종료·커밋 연결을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
+  const closing = issueOutcome.closing;
+  if (closing) {
+    if (closing.status === "commit") {
+      if (!sameCommitRef(closing.sha, receipt.commit, commitOutcome.resolvedSha)) {
+        return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 최종 종료 커밋(${closing.sha.slice(0, 7)})과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+      }
+    } else if (closing.status === "manual") {
+      if (!commitOutcome.issues?.includes(receipt.issue)) {
+        return `수동 종료된 이슈(${receipt.repo}#${receipt.issue})는 원격 통합 커밋(${receipt.commit}) 메시지에서 대상 이슈 참조가 확인돼야 검증 대기를 idle로 내릴 수 있습니다.`;
+      }
+    } else {
+      return `대상 이슈(${receipt.repo}#${receipt.issue})의 최종 종료 커밋 연결을 확인할 수 없어(${closing.status}) 검증 대기를 idle로 내릴 수 없습니다.`;
+    }
+  } else if (issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0) {
+    if (!issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))) {
+      return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 종료 커밋과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+    }
+  } else {
+    return `대상 이슈(${receipt.repo}#${receipt.issue})의 종료 커밋 정보를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
   }
   if (!commitCitedInText(last.text, receipt.commit, commitOutcome.resolvedSha)) {
     return `영수증의 통합 커밋(${receipt.commit})이 최신 완료 발췌의 통합 근거와 연결되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;

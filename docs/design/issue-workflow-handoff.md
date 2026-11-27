@@ -129,6 +129,9 @@ await classify_board_conversation({
   1. `server/outcome-verifier.ts`의 `verifyIssue()`가 `CLOSED`/`COMPLETED` 이슈에 대해 GitHub 이슈 타임라인(`repos/<repo>/issues/<issue>/timeline`)의 `closed` 이벤트 `commit_id`를 `closingCommits`로 조회하도록 연결하고, `server/coordinator.ts`에서 `closingCommits` 일치(또는 수동 종료 시 원격 커밋 메시지의 이슈 번호 일치 `commitOutcome.issues`)가 확인되지 않으면 fail-closed로 거절하도록 강화했습니다.
   2. `server/preferences.ts`에서 저장 스키마(`storedCompletionReceipt`)와 신규 제출 스키마(`completionReceipt`)를 분리해, 이전 판본이 저장한 `targetEvidenceId` 없는 `withdrawn` 기록이 있어도 `PreferenceStore.read()`가 실패하지 않고 호환 읽기되도록 수정했습니다.
   3. `server/coordinator.ts`의 `matchesQuestionTopic`이 철회 문장에 열린 질문에 없는 새 주제·행위 단어(“H1 사진 배포 요청”)가 섞이거나 짧은 질문의 핵심 토큰(“검토”)이 누락된 경우 거절하도록 강화했습니다.
+- **2026-11-27 (독립 의도 리뷰 17차 `1271d3f` 지적 2건 반영)**:
+  1. `server/outcome-verifier.ts`에 `ClosingCommitResolution`(`commit` · `manual` · `foreign_commit` · `unavailable`)을 도입해, 타임라인 조회 실패·잘림(`unavailable`)과 타 저장소 종료 커밋(`foreign_commit`)을 확인된 수동 종료(`manual`)와 엄격히 구분하고, 확인된 `manual` 상태에서만 원격 커밋 메시지의 이슈 참조 대체 대조를 허용하도록 수정했습니다(`server/coordinator.ts`).
+  2. `fetchLatestClosingCommit`이 `reopened` 이후의 **마지막 `closed` 이벤트**만 현재 종료 근거로 채택하도록 수정해, 재개 이전의 옛 종료 커밋(`e9fe346`)이 현재 `CLOSED` 상태의 근거로 수락되지 않게 했습니다.
 
 ## Acceptance criteria
 

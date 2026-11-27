@@ -5,10 +5,16 @@ import { repositorySlug } from "../shared/prs";
 
 export type IssueState = "OPEN" | "CLOSED" | "UNKNOWN";
 export type IssueCloseReason = "COMPLETED" | "NOT_PLANNED" | "REOPENED" | "DUPLICATE" | "UNKNOWN";
+export type ClosingCommitResolution =
+  | { status: "commit"; sha: string }
+  | { status: "manual" }
+  | { status: "foreign_commit" }
+  | { status: "unavailable" };
 export type IssueOutcome = {
   state: IssueState;
   stateReason: IssueCloseReason;
   url?: string;
+  closing?: ClosingCommitResolution;
   closingCommits?: string[];
 };
 export type CommitCheckStatus = "passed" | "failed" | "pending" | "unavailable";
@@ -256,30 +262,43 @@ const rawTimelineEvent = z.object({
   commit_url: z.string().nullish(),
 });
 
-async function fetchClosingCommits(
+async function fetchLatestClosingCommit(
   repo: string,
   issue: number,
   runner: (command: "git" | "gh", args: string[]) => Promise<string>,
-): Promise<string[]> {
-  const commits = new Set<string>();
+): Promise<ClosingCommitResolution> {
   const expectedPrefix = `https://api.github.com/repos/${repo.toLowerCase()}/commits/`;
+  let latestClosed: z.output<typeof rawTimelineEvent> | undefined;
+  let complete = false;
   try {
     for (let page = 1; page <= maxCheckPages; page += 1) {
       const raw = await runner("gh", ["api", `repos/${repo}/issues/${issue}/timeline?per_page=100&page=${page}`]);
       const events = z.array(rawTimelineEvent).parse(JSON.parse(raw));
       for (const ev of events) {
-        if (ev.event !== "closed" || typeof ev.commit_id !== "string") continue;
-        const sha = ev.commit_id.trim().toLowerCase();
-        if (!/^[0-9a-f]{40}$/.test(sha)) continue;
-        if (ev.commit_url && !ev.commit_url.toLowerCase().startsWith(expectedPrefix)) continue;
-        commits.add(sha);
+        if (ev.event === "reopened") {
+          latestClosed = undefined;
+        } else if (ev.event === "closed") {
+          latestClosed = ev;
+        }
       }
-      if (events.length < 100) break;
+      if (events.length < 100) {
+        complete = true;
+        break;
+      }
     }
   } catch {
-    return [];
+    return { status: "unavailable" };
   }
-  return [...commits];
+  if (!complete || !latestClosed) return { status: "unavailable" };
+  if (latestClosed.commit_id == null || latestClosed.commit_id.trim() === "") {
+    return { status: "manual" };
+  }
+  const sha = latestClosed.commit_id.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha)) return { status: "unavailable" };
+  if (latestClosed.commit_url && !latestClosed.commit_url.toLowerCase().startsWith(expectedPrefix)) {
+    return { status: "foreign_commit" };
+  }
+  return { status: "commit", sha };
 }
 
 export function createOutcomeVerifier(
@@ -307,15 +326,20 @@ export function createOutcomeVerifier(
           return { state: "UNKNOWN", stateReason: "UNKNOWN" };
         }
         const stateReason = normalizeCloseReason(parsed.stateReason);
-        const closingCommits =
-          parsed.state === "CLOSED" && stateReason === "COMPLETED"
-            ? await fetchClosingCommits(parsedRepo.data, issue, runner)
-            : [];
+        if (parsed.state === "CLOSED" && stateReason === "COMPLETED") {
+          const closing = await fetchLatestClosingCommit(parsedRepo.data, issue, runner);
+          return {
+            state: parsed.state,
+            stateReason,
+            url: parsed.url,
+            closing,
+            ...(closing.status === "commit" ? { closingCommits: [closing.sha] } : {}),
+          };
+        }
         return {
           state: parsed.state,
           stateReason,
           url: parsed.url,
-          ...(closingCommits.length > 0 ? { closingCommits } : {}),
         };
       } catch {
         return { state: "UNKNOWN", stateReason: "UNKNOWN" };

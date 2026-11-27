@@ -591,18 +591,44 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
       });
     }
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/308/timeline?per_page=100&page=1") {
+      // Closed by e9fe346 -> reopened -> closed by cf6f661: ONLY the final closing commit cf6f661 is valid!
       return JSON.stringify([
+        {
+          event: "closed",
+          commit_id: "e9fe346000000000000000000000000000000000",
+          commit_url: "https://api.github.com/repos/acme/easydocs/commits/e9fe346000000000000000000000000000000000",
+        },
+        { event: "reopened", commit_id: null, commit_url: null },
         {
           event: "closed",
           commit_id: "cf6f661000000000000000000000000000000000",
           commit_url: "https://api.github.com/repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000",
         },
+      ]);
+    }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "310") {
+      return JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/EasyDocs/issues/310" });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/310/timeline?per_page=100&page=1") {
+      throw new Error("timeline API error");
+    }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "311") {
+      return JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/EasyDocs/issues/311" });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/311/timeline?per_page=100&page=1") {
+      return JSON.stringify([
         {
           event: "closed",
           commit_id: "e9fe346000000000000000000000000000000000",
           commit_url: "https://api.github.com/repos/other/easydocs/commits/e9fe346000000000000000000000000000000000",
         },
       ]);
+    }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "312") {
+      return JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/EasyDocs/issues/312" });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/312/timeline?per_page=100&page=1") {
+      return JSON.stringify([{ event: "closed", commit_id: null, commit_url: null }]);
     }
     if (cmd === "gh" && args[0] === "issue" && args[2] === "309") {
       return JSON.stringify({
@@ -664,7 +690,26 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     state: "CLOSED",
     stateReason: "COMPLETED",
     url: "https://github.com/acme/EasyDocs/issues/308",
+    closing: { status: "commit", sha: "cf6f661000000000000000000000000000000000" },
     closingCommits: ["cf6f661000000000000000000000000000000000"],
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 310)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/310",
+    closing: { status: "unavailable" },
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 311)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/311",
+    closing: { status: "foreign_commit" },
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 312)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/312",
+    closing: { status: "manual" },
   });
   expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
     state: "UNKNOWN",
@@ -847,9 +892,26 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   const legacyPrefs = new PreferenceStore(legacyScopePath);
   expect(legacyPrefs.read().judgments.w305.receipt).toEqual({ kind: "withdrawn", reason: "이전 판본 철회" });
 
-  // 7. When neither closingCommits nor commitOutcome.issues links commit to #308, fail closed!
+  // 7. Timeline lookup failure ("unavailable") and foreign closing commit ("foreign_commit") MUST fail closed even when commit message references #308!
   workspaces[1].gitRuntime.remoteUrl = "https://github.com/acme/EasyDocs.git";
   midVerifyAction = undefined;
+  commitStates.set("acme/easydocs@cf6f661", {
+    onMain: true,
+    resolvedSha: "cf6f661000000000000000000000000000000000",
+    issues: [308],
+    checks: "passed",
+  });
+  for (const closing of [{ status: "unavailable" as const }, { status: "foreign_commit" as const }]) {
+    issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED", closing });
+    await expect(run("classify_board_conversation", {
+      sessionId: "w308",
+      evidenceId: ev.evidenceId,
+      kind: "idle",
+      text: "#308 완료",
+      receipt: validReceipt,
+    })).rejects.toThrow(/최종 종료 커밋 연결을 확인할 수 없어/);
+  }
+  // When neither closing nor closingCommits is present, also fail closed!
   issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
@@ -857,7 +919,7 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     kind: "idle",
     text: "#308 완료",
     receipt: validReceipt,
-  })).rejects.toThrow(/종료·커밋 연결을 확인할 수 없어/);
+  })).rejects.toThrow(/종료 커밋 정보를 확인할 수 없어/);
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {
