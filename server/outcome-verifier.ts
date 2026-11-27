@@ -130,22 +130,23 @@ const rawCommitMeta = z.object({
   commit: z.object({ message: z.string().optional() }).optional(),
 });
 
+const negatedClosePrefixPattern = /(?:(?:does|did|will|would|can|could|should)\s+not|(?:doesn't|didn't|won't|can't|not|never|no))\s+$/i;
+
 function extractCommitIssues(message: string | undefined, targetRepo: string): number[] | undefined {
   if (!message) return undefined;
   const expectedRepo = targetRepo.toLowerCase();
   const cleaned = message
     .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi, " ")
-    .replace(/(?:\bPR\b|pull\s*request)\s*#\d+\b/gi, " ");
+    .replace(/(?:\bPR\b|pull\s*request)\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/gi, " ");
   const ids = new Set<number>();
-  for (const match of cleaned.matchAll(/https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/(\d+)\b/gi)) {
-    if (match[1].toLowerCase() !== expectedRepo) continue;
-    const n = Number(match[2]);
-    if (Number.isSafeInteger(n) && n > 0) ids.add(n);
-  }
-  const withoutUrls = cleaned.replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+\b/gi, " ");
-  for (const match of withoutUrls.matchAll(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)\b/g)) {
-    if (match[1] && match[1].toLowerCase() !== expectedRepo) continue;
-    const n = Number(match[2]);
+  const closingRefPattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/(\d+)|(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+))\b/gi;
+  for (const match of cleaned.matchAll(closingRefPattern)) {
+    const start = match.index ?? 0;
+    const prefix = cleaned.slice(Math.max(0, start - 24), start);
+    if (negatedClosePrefixPattern.test(prefix)) continue;
+    const repo = (match[1] ?? match[3])?.toLowerCase();
+    if (repo && repo !== expectedRepo) continue;
+    const n = Number(match[2] ?? match[4]);
     if (Number.isSafeInteger(n) && n > 0) ids.add(n);
   }
   return ids.size > 0 ? [...ids] : undefined;

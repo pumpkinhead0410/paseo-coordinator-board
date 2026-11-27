@@ -11,19 +11,39 @@ import { replyDetails } from "../shared/reply-history";
 import { factSchema } from "../shared/board-facts";
 
 const commitHash = z.string().trim().regex(/^[0-9a-f]{7,40}$/i);
+const submittedVerificationSchema = z.discriminatedUnion("source", [
+  z.object({
+    source: z.literal("ci"),
+    status: z.literal("passed"),
+    summary: z.string().trim().min(1).max(300),
+  }),
+  z.object({
+    source: z.literal("local"),
+    status: z.literal("passed"),
+    command: z.string().trim().min(1).max(300),
+    exitCode: z.literal(0),
+    summary: z.string().trim().min(1).max(300),
+  }),
+]);
+const storedVerificationSchema = z.object({
+  source: z.enum(["ci", "local"]),
+  status: z.literal("passed"),
+  command: z.string().trim().min(1).max(300).optional(),
+  exitCode: z.literal(0).optional(),
+  summary: z.string().trim().min(1).max(300),
+});
 const completedReceiptSchema = z.object({
   kind: z.literal("completed"),
   repo: repositorySlug,
   issue: z.number().int().positive().max(2147483647),
   commit: commitHash,
   verifiedCommit: commitHash,
-  verification: z.object({
-    source: z.enum(["ci", "local"]),
-    status: z.literal("passed"),
-    summary: z.string().trim().min(1).max(300),
-  }),
+  verification: submittedVerificationSchema,
   closeReason: z.literal("COMPLETED"),
   cleanupHandoff: z.string().trim().min(1).max(300).optional(),
+});
+const storedCompletedReceiptSchema = completedReceiptSchema.extend({
+  verification: storedVerificationSchema,
 });
 const notPlannedReceiptSchema = z.object({
   kind: z.literal("not_planned"),
@@ -44,7 +64,7 @@ export const completionReceipt = z.discriminatedUnion("kind", [
   }),
 ]);
 const storedCompletionReceipt = z.discriminatedUnion("kind", [
-  completedReceiptSchema,
+  storedCompletedReceiptSchema,
   notPlannedReceiptSchema,
   z.object({
     kind: z.literal("withdrawn"),

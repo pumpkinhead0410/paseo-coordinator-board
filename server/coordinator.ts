@@ -65,6 +65,30 @@ function commitCitedInText(text: string, commit: string, resolvedSha?: string): 
   });
 }
 
+const localPassOutcomePattern = /(?:통과|성공|일치|PASS|0\s*fail|exit(?:\s*code)?\s*[:=]?\s*0|\bpassed\b)/i;
+const localFailOutcomePattern = /(?:실패|통과하지\s*못|미실행|미검증|보류|오류|에러|\bfailed\b|\berror\b|exit(?:\s*code)?\s*[:=]?\s*[1-9])/i;
+
+function hasLocalVerificationEvidenceInText(text: string, command: string): boolean {
+  const normalizedCommand = command.trim().toLowerCase();
+  if (!normalizedCommand) return false;
+  const clauses = text
+    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|(?<!#\d+)\s*·\s*(?!#\d+\b))/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  const commandTokens = normalizedCommand
+    .split(/\s+/)
+    .map(t => t.replace(/^["'`(]+|["'`):,;]+$/g, ""))
+    .filter(t => t.length >= 2 && !["run", "exec", "--"].includes(t));
+  return clauses.some(clause => {
+    const lower = clause.toLowerCase();
+    const matchesCommand =
+      lower.includes(normalizedCommand) ||
+      (commandTokens.length > 0 && commandTokens.every(token => lower.includes(token)));
+    if (!matchesCommand) return false;
+    return localPassOutcomePattern.test(clause) && !localFailOutcomePattern.test(clause);
+  });
+}
+
 function matchesQuestionTopic(sentenceTokens: Set<string>, questionTokens: Set<string>): boolean {
   if (questionTokens.size === 0) return true;
   if (sentenceTokens.size === 0) return false;
@@ -314,6 +338,11 @@ export async function verifyIdleClassification(
   if (receipt.verification.source === "ci" && commitOutcome.checks !== "passed") {
     return `통합 커밋(${receipt.commit})의 통과된 CI 체크를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다(현재 상태: ${commitOutcome.checks}).`;
   }
+  if (receipt.verification.source === "local" && commitOutcome.checks !== "passed") {
+    if (!hasLocalVerificationEvidenceInText(last.text, receipt.verification.command)) {
+      return `로컬 검증 영수증(${receipt.verification.command})의 실행·통과 근거가 최신 발췌에서 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+    }
+  }
   return null;
 }
 
@@ -388,7 +417,7 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci'|'local', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}|{source:'local', status:'passed', command, exitCode:0, summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);

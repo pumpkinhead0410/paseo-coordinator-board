@@ -135,6 +135,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 18차 `9d9f9c6` 지적 2건 반영)**:
   1. `extractCommitIssues(message, targetRepo)`가 커밋 메시지의 `owner/repo#N`·이슈 URL에서 명시된 저장소를 `targetRepo`와 정확히 대조하도록 수정해, `Fixes other/easydocs#308`이 `acme/easydocs#308`의 수동 종료 대체 근거로 수락되지 않게 했습니다(`server/outcome-verifier.ts`).
   2. `fetchLatestClosingCommit`이 `commit_id` 필드 누락(`{ event: "closed" }`)을 `manual`이 아닌 `unavailable`로 처리하고, 커밋 종료 시 `commit_url`이 정확히 `${expectedPrefix}${sha}`와 일치할 때만 `commit`으로 인정하도록 강화했습니다(`server/outcome-verifier.ts`).
+- **2026-11-27 (독립 의도 리뷰 19차 `42f1e20` 지적 2건 반영)**:
+  1. `extractCommitIssues`가 PR 참조(`PR acme/easydocs#308`)와 부정 문맥(`Does not fix #308`)을 제외하고 긍정적 GitHub 종료 키워드(`Fixes`/`Closes`/`Resolves`)에 연결된 동일 저장소 이슈 참조만 인정하도록 강화했습니다(`server/outcome-verifier.ts`).
+  2. `local` 검증 영수증 제출 시 `command`와 `exitCode: 0`을 필수로 요구하고(저장 스키마 호환 유지), 원격 CI 통과가 없는 경우 최신 발췌에서 해당 검증 명령의 실행·통과 근거(`hasLocalVerificationEvidenceInText`)가 확인되지 않으면 fail-closed로 거절하도록 강화했습니다(`server/preferences.ts`, `server/coordinator.ts`).
 
 ## Acceptance criteria
 

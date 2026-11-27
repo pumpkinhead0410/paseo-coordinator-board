@@ -372,7 +372,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", summary: "D155 로컬 통과" } },
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, summary: "D155 로컬 통과" } },
   })).rejects.toThrow(/검증 상태가 failed/);
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
@@ -383,6 +383,14 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     text: "#308 완료",
     receipt: baseReceipt,
   })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
+  // Local verification without execution evidence of that command in the closing excerpt is also rejected fail-closed!
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, summary: "D155 로컬 통과" } },
+  })).rejects.toThrow(/로컬 검증 영수증.*확인되지 않아/);
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
   commitStates.set("acme/easydocs@e9fe346", { onMain: true, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" });
@@ -653,8 +661,23 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba40") {
       return JSON.stringify({
         sha: "f00ba40000000000000000000000000000000000",
-        commit: { message: "Fixes other/easydocs#308" },
+        commit: { message: "Update README. Does not fix #308. Docs sync from PR acme/easydocs#308. Fixes other/easydocs#308" },
       });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba41") {
+      return JSON.stringify({
+        sha: "f00ba41000000000000000000000000000000000",
+        commit: { message: "fix(photo): replace action\n\nCloses acme/easydocs#308" },
+      });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...f00ba41000000000000000000000000000000000") {
+      return "behind\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba41000000000000000000000000000000000/check-runs?per_page=100&page=1") {
+      return JSON.stringify({ total_count: 1, check_runs: [{ status: "completed", conclusion: "success" }] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba41000000000000000000000000000000000/status?per_page=100&page=1") {
+      return JSON.stringify({ state: "success", total_count: 0, statuses: [] });
     }
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...f00ba40000000000000000000000000000000000") {
       return "behind\n";
@@ -758,10 +781,17 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     url: "https://github.com/acme/EasyDocs/issues/314",
     closing: { status: "unavailable" },
   });
-  // Commit referencing foreign repo (Fixes other/easydocs#308) must NOT yield issue 308 for acme/easydocs!
+  // Commit with negated fix ("Does not fix #308"), PR ref ("PR acme/easydocs#308"), or foreign repo ("Fixes other/easydocs#308") must NOT yield issue 308!
   expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "f00ba40")).toEqual({
     onMain: true,
     resolvedSha: "f00ba40000000000000000000000000000000000",
+    checks: "passed",
+  });
+  // Positive closing keyword ("Closes acme/easydocs#308") DOES link issue 308!
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "f00ba41")).toEqual({
+    onMain: true,
+    resolvedSha: "f00ba41000000000000000000000000000000000",
+    issues: [308],
     checks: "passed",
   });
   expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
