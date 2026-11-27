@@ -130,19 +130,22 @@ const rawCommitMeta = z.object({
   commit: z.object({ message: z.string().optional() }).optional(),
 });
 
-function extractCommitIssues(message?: string): number[] | undefined {
+function extractCommitIssues(message: string | undefined, targetRepo: string): number[] | undefined {
   if (!message) return undefined;
+  const expectedRepo = targetRepo.toLowerCase();
   const cleaned = message
     .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi, " ")
     .replace(/(?:\bPR\b|pull\s*request)\s*#\d+\b/gi, " ");
   const ids = new Set<number>();
-  for (const match of cleaned.matchAll(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/(\d+)\b/gi)) {
-    const n = Number(match[1]);
+  for (const match of cleaned.matchAll(/https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/(\d+)\b/gi)) {
+    if (match[1].toLowerCase() !== expectedRepo) continue;
+    const n = Number(match[2]);
     if (Number.isSafeInteger(n) && n > 0) ids.add(n);
   }
   const withoutUrls = cleaned.replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+\b/gi, " ");
-  for (const match of withoutUrls.matchAll(/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)\b/g)) {
-    const n = Number(match[1]);
+  for (const match of withoutUrls.matchAll(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)\b/g)) {
+    if (match[1] && match[1].toLowerCase() !== expectedRepo) continue;
+    const n = Number(match[2]);
     if (Number.isSafeInteger(n) && n > 0) ids.add(n);
   }
   return ids.size > 0 ? [...ids] : undefined;
@@ -162,7 +165,7 @@ async function resolveRemoteMainAncestry(
     } else {
       const parsed = rawCommitMeta.parse(JSON.parse(raw));
       sha = parsed.sha.toLowerCase();
-      issues = extractCommitIssues(parsed.commit?.message);
+      issues = extractCommitIssues(parsed.commit?.message, repo);
     }
     if (!/^[0-9a-f]{40}$/.test(sha)) return { onMain: false };
     for (const base of ["main", "master"]) {
@@ -290,13 +293,24 @@ async function fetchLatestClosingCommit(
     return { status: "unavailable" };
   }
   if (!complete || !latestClosed) return { status: "unavailable" };
-  if (latestClosed.commit_id == null || latestClosed.commit_id.trim() === "") {
+  if (latestClosed.commit_id === undefined) return { status: "unavailable" };
+  if (latestClosed.commit_id === null) {
+    if (latestClosed.commit_url !== undefined && latestClosed.commit_url !== null) {
+      return { status: "unavailable" };
+    }
     return { status: "manual" };
   }
   const sha = latestClosed.commit_id.trim().toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(sha)) return { status: "unavailable" };
-  if (latestClosed.commit_url && !latestClosed.commit_url.toLowerCase().startsWith(expectedPrefix)) {
+  if (typeof latestClosed.commit_url !== "string" || latestClosed.commit_url.trim() === "") {
+    return { status: "unavailable" };
+  }
+  const url = latestClosed.commit_url.trim().toLowerCase();
+  if (!url.startsWith(expectedPrefix)) {
     return { status: "foreign_commit" };
+  }
+  if (url !== `${expectedPrefix}${sha}`) {
+    return { status: "unavailable" };
   }
   return { status: "commit", sha };
 }

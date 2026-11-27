@@ -630,6 +630,41 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/312/timeline?per_page=100&page=1") {
       return JSON.stringify([{ event: "closed", commit_id: null, commit_url: null }]);
     }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "313") {
+      return JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/EasyDocs/issues/313" });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/313/timeline?per_page=100&page=1") {
+      // Missing commit_id field -> MUST fail closed as unavailable (not manual)!
+      return JSON.stringify([{ event: "closed" }]);
+    }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "314") {
+      return JSON.stringify({ state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/EasyDocs/issues/314" });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/314/timeline?per_page=100&page=1") {
+      // Contradictory commit_id (e9fe346) vs commit_url (cf6f661) -> MUST fail closed as unavailable!
+      return JSON.stringify([
+        {
+          event: "closed",
+          commit_id: "e9fe346000000000000000000000000000000000",
+          commit_url: "https://api.github.com/repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000",
+        },
+      ]);
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba40") {
+      return JSON.stringify({
+        sha: "f00ba40000000000000000000000000000000000",
+        commit: { message: "Fixes other/easydocs#308" },
+      });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...f00ba40000000000000000000000000000000000") {
+      return "behind\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba40000000000000000000000000000000000/check-runs?per_page=100&page=1") {
+      return JSON.stringify({ total_count: 1, check_runs: [{ status: "completed", conclusion: "success" }] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/f00ba40000000000000000000000000000000000/status?per_page=100&page=1") {
+      return JSON.stringify({ state: "success", total_count: 0, statuses: [] });
+    }
     if (cmd === "gh" && args[0] === "issue" && args[2] === "309") {
       return JSON.stringify({
         state: "CLOSED",
@@ -710,6 +745,24 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     stateReason: "COMPLETED",
     url: "https://github.com/acme/EasyDocs/issues/312",
     closing: { status: "manual" },
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 313)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/313",
+    closing: { status: "unavailable" },
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 314)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/314",
+    closing: { status: "unavailable" },
+  });
+  // Commit referencing foreign repo (Fixes other/easydocs#308) must NOT yield issue 308 for acme/easydocs!
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "f00ba40")).toEqual({
+    onMain: true,
+    resolvedSha: "f00ba40000000000000000000000000000000000",
+    checks: "passed",
   });
   expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
     state: "UNKNOWN",
