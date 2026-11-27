@@ -70,10 +70,11 @@ function matchesQuestionTopic(sentenceTokens: Set<string>, questionTokens: Set<s
   if (sentenceTokens.size === 0) return false;
   let overlap = 0;
   for (const token of sentenceTokens) {
-    if (questionTokens.has(token)) overlap += 1;
+    if (!questionTokens.has(token)) return false;
+    overlap += 1;
   }
-  const required = Math.min(2, questionTokens.size);
-  return overlap >= required && overlap * 2 >= sentenceTokens.size;
+  const required = questionTokens.size <= 4 ? questionTokens.size : 2;
+  return overlap >= required;
 }
 
 function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>, openQuestionText: string): boolean {
@@ -278,8 +279,16 @@ export async function verifyIdleClassification(
   if (!commitOutcome.onMain) {
     return `통합 커밋(${receipt.commit})이 대상 저장소(${receipt.repo})의 main 브랜치에 반영된 것을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
   }
-  if (issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0 && !issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))) {
+  const hasClosingCommitLink =
+    issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0
+      ? issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))
+      : undefined;
+  if (hasClosingCommitLink === false) {
     return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 종료 커밋과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  const hasCommitIssueLink = !!commitOutcome.issues?.includes(receipt.issue);
+  if (hasClosingCommitLink === undefined && !hasCommitIssueLink) {
+    return `통합 커밋(${receipt.commit})과 대상 이슈(${receipt.repo}#${receipt.issue})의 종료·커밋 연결을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
   }
   if (!commitCitedInText(last.text, receipt.commit, commitOutcome.resolvedSha)) {
     return `영수증의 통합 커밋(${receipt.commit})이 최신 완료 발췌의 통합 근거와 연결되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;

@@ -250,6 +250,38 @@ async function lookupCommitChecks(
   return summary;
 }
 
+const rawTimelineEvent = z.object({
+  event: z.string().nullish(),
+  commit_id: z.string().nullish(),
+  commit_url: z.string().nullish(),
+});
+
+async function fetchClosingCommits(
+  repo: string,
+  issue: number,
+  runner: (command: "git" | "gh", args: string[]) => Promise<string>,
+): Promise<string[]> {
+  const commits = new Set<string>();
+  const expectedPrefix = `https://api.github.com/repos/${repo.toLowerCase()}/commits/`;
+  try {
+    for (let page = 1; page <= maxCheckPages; page += 1) {
+      const raw = await runner("gh", ["api", `repos/${repo}/issues/${issue}/timeline?per_page=100&page=${page}`]);
+      const events = z.array(rawTimelineEvent).parse(JSON.parse(raw));
+      for (const ev of events) {
+        if (ev.event !== "closed" || typeof ev.commit_id !== "string") continue;
+        const sha = ev.commit_id.trim().toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(sha)) continue;
+        if (ev.commit_url && !ev.commit_url.toLowerCase().startsWith(expectedPrefix)) continue;
+        commits.add(sha);
+      }
+      if (events.length < 100) break;
+    }
+  } catch {
+    return [];
+  }
+  return [...commits];
+}
+
 export function createOutcomeVerifier(
   runner: (command: "git" | "gh", args: string[]) => Promise<string> = runCommand,
 ): OutcomeVerifier {
@@ -274,10 +306,16 @@ export function createOutcomeVerifier(
         if (parsed.url.toLowerCase() !== expectedUrl) {
           return { state: "UNKNOWN", stateReason: "UNKNOWN" };
         }
+        const stateReason = normalizeCloseReason(parsed.stateReason);
+        const closingCommits =
+          parsed.state === "CLOSED" && stateReason === "COMPLETED"
+            ? await fetchClosingCommits(parsedRepo.data, issue, runner)
+            : [];
         return {
           state: parsed.state,
-          stateReason: normalizeCloseReason(parsed.stateReason),
+          stateReason,
           url: parsed.url,
+          ...(closingCommits.length > 0 ? { closingCommits } : {}),
         };
       } catch {
         return { state: "UNKNOWN", stateReason: "UNKNOWN" };

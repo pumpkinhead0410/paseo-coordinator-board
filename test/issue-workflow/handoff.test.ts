@@ -289,8 +289,12 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     receipt: baseReceipt,
   })).rejects.toThrow(/COMPLETED 종료가 확인되지 않아/);
 
-  // Close issue #308 as COMPLETED, but commit cf6f661 is still only on a feature branch (onMain: false) -> rejected.
-  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
+  // Close issue #308 as COMPLETED (with closingCommit cf6f661), but commit cf6f661 is still only on a feature branch (onMain: false) -> rejected.
+  issueStates.set("acme/easydocs#308", {
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    closingCommits: ["cf6f661000000000000000000000000000000000"],
+  });
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: initialExcerpt.evidenceId,
@@ -333,7 +337,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     kind: "idle",
     text: "#308 완료",
     receipt: { ...baseReceipt, commit: "e9fe346", verifiedCommit: "e9fe346" },
-  })).rejects.toThrow(/통합 근거와 연결되지 않아/);
+  })).rejects.toThrow(/종료 커밋과 일치하지 않아/);
 
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
@@ -388,7 +392,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     kind: "idle",
     text: "#308 완료",
     receipt: { ...baseReceipt, commit: "e9fe346", verifiedCommit: "e9fe346" },
-  })).rejects.toThrow(/통합 근거와 연결되지 않아/);
+  })).rejects.toThrow(/종료 커밋과 일치하지 않아/);
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: latestExcerpt.evidenceId,
@@ -530,16 +534,16 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
-  // Withdrawing a DIFFERENT request within the same issue (even sharing one word like "공식" or mentioning the topic in another sentence) is rejected!
+  // Withdrawing a DIFFERENT request sharing two tokens ("2단계 공식 배포 요청이 취소됐습니다") is still rejected!
   w305.updatedAt = "2026-11-26T06:39:00Z";
-  timelines.get("w305")!.push("#305의 공식 배포 일정 변경 요청이 취소됐습니다. 2단계 자료에 관한 문서를 첨부합니다.");
+  timelines.get("w305")!.push("#305 2단계 공식 배포 요청이 취소됐습니다.");
   const otherRequestWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
   await expect(run("classify_board_conversation", {
     sessionId: "w305",
     evidenceId: otherRequestWithdraw305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "배포 일정 변경 취소" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "배포 취소" },
   })).rejects.toThrow(/철회·취소 근거/);
 
   // When the user withdraws the #305 stage-2 request, idle classification requires targetEvidenceId matching the open question (and no integration commit)!
@@ -585,6 +589,20 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
         stateReason: "COMPLETED",
         url: "https://github.com/acme/EasyDocs/issues/308",
       });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/issues/308/timeline?per_page=100&page=1") {
+      return JSON.stringify([
+        {
+          event: "closed",
+          commit_id: "cf6f661000000000000000000000000000000000",
+          commit_url: "https://api.github.com/repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000",
+        },
+        {
+          event: "closed",
+          commit_id: "e9fe346000000000000000000000000000000000",
+          commit_url: "https://api.github.com/repos/other/easydocs/commits/e9fe346000000000000000000000000000000000",
+        },
+      ]);
     }
     if (cmd === "gh" && args[0] === "issue" && args[2] === "309") {
       return JSON.stringify({
@@ -646,6 +664,7 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     state: "CLOSED",
     stateReason: "COMPLETED",
     url: "https://github.com/acme/EasyDocs/issues/308",
+    closingCommits: ["cf6f661000000000000000000000000000000000"],
   });
   expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
     state: "UNKNOWN",
@@ -690,7 +709,11 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     onTimelineRefetch: () => finalTimelineAction?.(),
   });
   const w308 = agents.find(a => a.id === "w308")!;
-  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
+  issueStates.set("acme/easydocs#308", {
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    closingCommits: ["cf6f661000000000000000000000000000000000"],
+  });
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
 
   const validReceipt = {
@@ -803,7 +826,38 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     text: "#308 완료",
     receipt: validReceipt,
   })).rejects.toThrow(/프로젝트 저장소 설정이 바뀌었습니다/);
-  expect(prefs.read().judgments.w308).toBeUndefined();
+  // 6. Legacy scope.json containing a prior `withdrawn` receipt without targetEvidenceId remains readable by PreferenceStore.read()!
+  const legacyDir = mkdtempSync(join(tmpdir(), "board-legacy-withdrawn-"));
+  dirs.push(legacyDir);
+  const legacyScopePath = join(legacyDir, "scope.json");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(legacyScopePath, JSON.stringify({
+    projects: ["easydocs"],
+    coordinator: "coord",
+    judgments: {
+      w305: {
+        projectId: "easydocs",
+        evidenceId: "legacy-ev",
+        kind: "idle",
+        text: "#305 철회",
+        receipt: { kind: "withdrawn", reason: "이전 판본 철회" },
+      },
+    },
+  }));
+  const legacyPrefs = new PreferenceStore(legacyScopePath);
+  expect(legacyPrefs.read().judgments.w305.receipt).toEqual({ kind: "withdrawn", reason: "이전 판본 철회" });
+
+  // 7. When neither closingCommits nor commitOutcome.issues links commit to #308, fail closed!
+  workspaces[1].gitRuntime.remoteUrl = "https://github.com/acme/EasyDocs.git";
+  midVerifyAction = undefined;
+  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/종료·커밋 연결을 확인할 수 없어/);
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

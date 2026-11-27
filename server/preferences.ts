@@ -11,32 +11,44 @@ import { replyDetails } from "../shared/reply-history";
 import { factSchema } from "../shared/board-facts";
 
 const commitHash = z.string().trim().regex(/^[0-9a-f]{7,40}$/i);
+const completedReceiptSchema = z.object({
+  kind: z.literal("completed"),
+  repo: repositorySlug,
+  issue: z.number().int().positive().max(2147483647),
+  commit: commitHash,
+  verifiedCommit: commitHash,
+  verification: z.object({
+    source: z.enum(["ci", "local"]),
+    status: z.literal("passed"),
+    summary: z.string().trim().min(1).max(300),
+  }),
+  closeReason: z.literal("COMPLETED"),
+  cleanupHandoff: z.string().trim().min(1).max(300).optional(),
+});
+const notPlannedReceiptSchema = z.object({
+  kind: z.literal("not_planned"),
+  repo: repositorySlug,
+  issue: z.number().int().positive().max(2147483647),
+  closeReason: z.literal("NOT_PLANNED"),
+  stopReason: z.string().trim().min(1).max(300),
+  cleanupHandoff: z.string().trim().min(1).max(300).optional(),
+});
 export const completionReceipt = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("completed"),
-    repo: repositorySlug,
-    issue: z.number().int().positive().max(2147483647),
-    commit: commitHash,
-    verifiedCommit: commitHash,
-    verification: z.object({
-      source: z.enum(["ci", "local"]),
-      status: z.literal("passed"),
-      summary: z.string().trim().min(1).max(300),
-    }),
-    closeReason: z.literal("COMPLETED"),
-    cleanupHandoff: z.string().trim().min(1).max(300).optional(),
-  }),
-  z.object({
-    kind: z.literal("not_planned"),
-    repo: repositorySlug,
-    issue: z.number().int().positive().max(2147483647),
-    closeReason: z.literal("NOT_PLANNED"),
-    stopReason: z.string().trim().min(1).max(300),
-    cleanupHandoff: z.string().trim().min(1).max(300).optional(),
-  }),
+  completedReceiptSchema,
+  notPlannedReceiptSchema,
   z.object({
     kind: z.literal("withdrawn"),
     targetEvidenceId: z.string().min(1).max(64),
+    targetNoteRevision: z.number().int().nonnegative().optional(),
+    reason: z.string().trim().min(1).max(300),
+  }),
+]);
+const storedCompletionReceipt = z.discriminatedUnion("kind", [
+  completedReceiptSchema,
+  notPlannedReceiptSchema,
+  z.object({
+    kind: z.literal("withdrawn"),
+    targetEvidenceId: z.string().min(1).max(64).optional(),
     targetNoteRevision: z.number().int().nonnegative().optional(),
     reason: z.string().trim().min(1).max(300),
   }),
@@ -46,6 +58,11 @@ export type CompletionReceipt = z.infer<typeof completionReceipt>;
 export const judgment = z.object({
   content: decisionFields.optional(),
   receipt: completionReceipt.optional(),
+  evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
+});
+const storedJudgment = z.object({
+  content: decisionFields.optional(),
+  receipt: storedCompletionReceipt.optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });
 const coordinatorConfig = z.object({ provider: z.string(), thinkingOptionId: z.string().optional(), modeId: z.string().optional() });
@@ -65,7 +82,7 @@ const schema = z.object({
     id: z.string(), coordinator: z.string(), expires: z.number(), messageId: z.string().optional(),
     candidates: z.record(z.string(), z.string()),
   }).optional(),
-  judgments: z.record(z.string(), judgment.extend({
+  judgments: z.record(z.string(), storedJudgment.extend({
     projectId: z.string(),
     requestedAt: z.string().optional(),
   })),

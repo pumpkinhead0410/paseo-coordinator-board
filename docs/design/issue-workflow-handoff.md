@@ -125,6 +125,10 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 15차 `4bcfaeb` 지적 2건 반영)**:
   1. `commitCitedInText`에서 유일 SHA 예외(`allTokens.size === 1`)를 제거하고 접속 어미(`이고`, `이며` 등) 단위 분리·`재현 로그`/`최종검증 대기` 차단 및 `IssueOutcome.closingCommits` 대조를 추가해, 재현 로그나 같은 문장 내 타 SHA(`e9fe346`)가 통합 커밋으로 수락되지 않게 했습니다(`server/coordinator.ts`, `server/outcome-verifier.ts`).
   2. `withdrawn` 영수증에 `targetEvidenceId`와 `targetNoteRevision`(열린 `agent-note` 보고 대상)을 추가하고 `read_board_conversation({})`의 `note`에 `revision`을 노출하며, `matchesQuestionTopic`이 단일 공통 단어 일치가 아니라 핵심 주제 다수 일치(최소 2개 또는 질문 토큰 전부 + 철회 문장 토큰의 50% 이상)를 요구하도록 강화했습니다(`server/preferences.ts`, `server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 16차 `58d7c2c` 지적 3건 반영)**:
+  1. `server/outcome-verifier.ts`의 `verifyIssue()`가 `CLOSED`/`COMPLETED` 이슈에 대해 GitHub 이슈 타임라인(`repos/<repo>/issues/<issue>/timeline`)의 `closed` 이벤트 `commit_id`를 `closingCommits`로 조회하도록 연결하고, `server/coordinator.ts`에서 `closingCommits` 일치(또는 수동 종료 시 원격 커밋 메시지의 이슈 번호 일치 `commitOutcome.issues`)가 확인되지 않으면 fail-closed로 거절하도록 강화했습니다.
+  2. `server/preferences.ts`에서 저장 스키마(`storedCompletionReceipt`)와 신규 제출 스키마(`completionReceipt`)를 분리해, 이전 판본이 저장한 `targetEvidenceId` 없는 `withdrawn` 기록이 있어도 `PreferenceStore.read()`가 실패하지 않고 호환 읽기되도록 수정했습니다.
+  3. `server/coordinator.ts`의 `matchesQuestionTopic`이 철회 문장에 열린 질문에 없는 새 주제·행위 단어(“H1 사진 배포 요청”)가 섞이거나 짧은 질문의 핵심 토큰(“검토”)이 누락된 경우 거절하도록 강화했습니다.
 
 ## Acceptance criteria
 
