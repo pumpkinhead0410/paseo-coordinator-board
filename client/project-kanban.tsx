@@ -43,7 +43,10 @@ function CardView({ card, theme, onOpen, onEdit, sessionHostLabel }: { card: Car
     : session.decision?.questionMarkdown ?? question;
   const detailIsQuestion = !!question && (question === session.detail || session.detail.endsWith(" · " + question));
   const runtime = [session.provider, session.model === session.provider ? null : session.model].filter(Boolean).join(" / ");
-  const noteTitle = note && note.kind !== "clear" ? [note.origin === "agent" ? t("세션 보고", "Session report") : null, noteLabel(note.kind, t)].filter(Boolean).join(" · ") : null;
+  const noteTitle = note && note.kind !== "clear"
+    ? [session.agentNoteSuperseded && note.origin === "agent" ? t("이전 세션 보고", "Previous session report")
+      : note.origin === "agent" ? t("세션 보고", "Session report") : null, noteLabel(note.kind, t)].filter(Boolean).join(" · ")
+    : null;
   return (
     <View style={{ padding: 10, borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface0, gap: 6 }}>
       <Pressable accessibilityRole="button" accessibilityState={{ expanded }}

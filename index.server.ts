@@ -262,6 +262,7 @@ export default function contribute(server: PluginServerContext) {
           }
           releaseUnmanagedCoordinator(rows, scope);
           for (const [id, d] of Object.entries(scope.judgments)) if (d.projectId === change.projectId) delete scope.judgments[id];
+          for (const [id, d] of Object.entries(scope.supersededAgentNotes)) if (d.projectId === change.projectId) delete scope.supersededAgentNotes[id];
         }
         reader.retain(new Set(managedSessions(rows, scope).map(r => r.id)));
       });
@@ -292,6 +293,6 @@ export default function contribute(server: PluginServerContext) {
     return { ok: true };
   });
   const removeReport = attachReportTool(server, notes);
-  const removeCoordinator = attachCoordinatorTools(server, prefs, reader, [...operations.tools, facts.tool, trackedReviewTool(prefs, tracked, prs, reader, invalidateCount)]);
+  const removeCoordinator = attachCoordinatorTools(server, prefs, reader, [...operations.tools, facts.tool, trackedReviewTool(prefs, tracked, prs, reader, invalidateCount)], notes);
   return () => { removeMergeTurn(); removeMergePermission(); removeReplyClose(); removeReplyArchive(); removeCoordinator(); removeReport(); };
 }
