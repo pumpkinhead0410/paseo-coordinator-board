@@ -377,13 +377,13 @@ export function BoardView({ snapshot, readiness, theme, layout, hostLabel, hostI
           </>}
         </View>}
         {decisionsSection}
-      </> : activeTab === "work" ? <View style={{ gap: 20 }}>
+      </> : <View style={{ gap: 20, display: activeTab === "work" ? "flex" : "none" }}>
         {decisionsSection}
         <View style={{ height: 1, backgroundColor: c.border }} />
         <OperationsPanel settings={false} theme={theme} coordinator={operationsReady ? coordinatorId ?? null : null} configured={operationsReady && !!configured}
           refreshBoard={onRefresh} openCoordinator={actions.onOpen} />
         {filteredHistory.length > 0 && <ReplyHistory links={historyLinks} openRemote={onOpenHostSession} entries={filteredHistory} theme={theme} open={actions.onOpen} expanded={showHistory} onToggle={() => setHistoryOpen(!showHistory)} />}
-      </View> : null}
+      </View>}
       {!settings && snapshot && !configured && !snapshot.projects.length && <Text style={{ color: c.foregroundMuted }}>{t("표시할 세션이 없습니다. 워크스페이스에서 세션을 시작하면 여기에 나타납니다.", "Start a session in a workspace to see it here.")}</Text>}
       </View>
       {!settings && configured && snapshot && activeTab === "kanban" && <SessionProgress theme={theme} cards={visibleCards}
