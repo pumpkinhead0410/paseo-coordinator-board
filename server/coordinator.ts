@@ -218,6 +218,7 @@ export async function verifyIdleClassification(
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
   const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
+  const hasPinnedVerificationTarget = context.previousVerificationTarget !== undefined;
   const pinnedTargetIssues = context.previousVerificationTarget?.issues ?? [];
   const anchoredIssues = computeAnchoredIssues(
     latest,
@@ -229,7 +230,7 @@ export async function verifyIdleClassification(
     },
     false,
   );
-  const effectiveAnchoredIssues = pinnedTargetIssues.length > 0 ? new Set(pinnedTargetIssues) : anchoredIssues;
+  const effectiveAnchoredIssues = hasPinnedVerificationTarget ? new Set(pinnedTargetIssues) : anchoredIssues;
   const hasAnchoredIssue = effectiveAnchoredIssues.size > 0;
   const hasVerificationWait = hasPriorVerificationWait({
     previousKind: context.previousKind,
@@ -324,14 +325,17 @@ export async function verifyIdleClassification(
   }
 
   if (effectiveAnchoredIssues.size === 0) {
+    if (hasPinnedVerificationTarget) {
+      return `미해결 검증 대기의 대상 이슈가 확정되지 않아 영수증(#${receipt.issue})으로 자동 idle 전환할 수 없습니다. 사람이 직접 확인해 완료 기록(saveNote)하세요.`;
+    }
     return `세션 제목·워크스페이스·이전 판단·이전 대화에서 대상 이슈 번호를 확인할 수 없어 #${receipt.issue} 영수증을 대조할 수 없습니다.`;
   }
   if (effectiveAnchoredIssues.size > 1) {
-    const label = pinnedTargetIssues.length > 0 ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
+    const label = hasPinnedVerificationTarget ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
     return `${label}가 복수(${[...effectiveAnchoredIssues].sort((a, b) => a - b).map(n => `#${n}`).join(", ")})로 묶여 있어 단일 영수증(#${receipt.issue})만으로 idle로 해제할 수 없습니다.`;
   }
   if (!effectiveAnchoredIssues.has(receipt.issue)) {
-    const label = pinnedTargetIssues.length > 0 ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
+    const label = hasPinnedVerificationTarget ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
     return `영수증 이슈(#${receipt.issue})가 ${label}(${[...effectiveAnchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
   }
 
@@ -689,8 +693,8 @@ export function attachCoordinatorTools(
                   ? priorVerificationTextIssues
                   : turnIssues;
             const issues = [...targetIssueSet].sort((a, b) => a - b).slice(0, 20);
-            if (input.kind === "review" && issues.length > 1) {
-              throw new Error(`검증 대기(review)는 세션당 하나의 대상 이슈만 고정할 수 있습니다(감지된 이슈: ${issues.map(n => `#${n}`).join(", ")}). 이슈별로 세션을 분리하거나 단일 대상 이슈만 명시해 기록하세요.`);
+            if (issues.length > 1) {
+              throw new Error(`검증 대기 대상은 세션당 하나의 이슈만 고정할 수 있습니다(감지된 이슈: ${issues.map(n => `#${n}`).join(", ")}). 이슈별로 세션을 분리하거나 단일 대상 이슈만 명시해 기록하세요.`);
             }
             nextVerificationTarget = verificationTargetSchema.parse({
               ...(currentResolvedRepo ? { repo: currentResolvedRepo } : {}),

@@ -1247,13 +1247,36 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   expect(prefs.read().judgments.w_untitled.verificationPending).toBeUndefined();
   expect(prefs.read().judgments.w_untitled.verificationTarget).toBeUndefined();
 
-  // 11. Multi-issue verification waits (`#308 및 #999`) MUST be rejected at `review` time, AND legacy multi-issue `verificationTarget` MUST NOT be cleared by a single receipt!
+  // 11. Multi-issue verification waits (`#308 및 #999`) MUST be rejected at `review` AND `question` creation time, AND legacy multi-issue `verificationTarget` MUST NOT be cleared by a single receipt!
   await expect(run("classify_board_conversation", {
     sessionId: "w_untitled",
     evidenceId: untitledEv4.evidenceId,
     kind: "review",
     text: "#308 및 #999 최종 검증 대기",
-  })).rejects.toThrow(/세션당 하나의 대상 이슈만 고정할 수 있습니다/);
+  })).rejects.toThrow(/세션당 하나의 이슈만 고정할 수 있습니다/);
+  // Also reject creating a new multi-issue `verificationTarget` via `question` when an active agent-note reports multiple issues!
+  const wMultiNote = {
+    id: "w_multi_note",
+    title: "복수 보고 세션",
+    status: "idle",
+    projectId: "easydocs",
+    workspaceId: "wks_office",
+    updatedAt: "2026-11-26T07:23:30Z",
+    pendingPermissions: [],
+    labels: { coordinatorBoardParent: "coord" },
+  };
+  agents.push(wMultiNote);
+  timelines.set("w_multi_note", ["검증 일정 확인이 필요합니다."]);
+  const multiNoteEv = JSON.parse(await run("read_board_conversation", { sessionId: "w_multi_note" }));
+  expect(recordReport(notes, "w_multi_note", { kind: "review", text: "#308 및 #999 최종 검증 대기" }, multiNoteEv.evidenceId).isError).not.toBe(true);
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_multi_note",
+    evidenceId: multiNoteEv.evidenceId,
+    kind: "question",
+    text: "검증 일정 문의",
+    content: { question: "검증 일정이 언제인가요?", needsInput: "일정" },
+  })).rejects.toThrow(/세션당 하나의 이슈만 고정할 수 있습니다/);
+  expect(prefs.read().judgments.w_multi_note).toBeUndefined();
   // Simulate a legacy stored judgment with two pinned issues `[308, 999]` and confirm single `#999` receipt cannot clear it!
   prefs.change(scope => {
     scope.judgments.w_untitled = {
@@ -1308,6 +1331,32 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   expect(prefs.read().judgments.w_overflow).toMatchObject({
     kind: "review",
     reviewKind: "verification",
+    verificationPending: true,
+    verificationTarget: { repo: "acme/easydocs", issues: [] },
+  });
+  // When `verificationTarget.issues` is empty (unanchored verification wait), a later turn mentioning `#999` + valid `#999` receipt MUST NOT clear it!
+  wOverflow.updatedAt = "2026-11-26T07:26:00Z";
+  timelines.get("w_overflow")!.push("별건 #999 작업을 논의했습니다.");
+  wOverflow.updatedAt = "2026-11-26T07:27:00Z";
+  timelines.get("w_overflow")!.push("#999 999aaaa 원격 main 통합 완료.");
+  const overflowEv2 = JSON.parse(await run("read_board_conversation", { sessionId: "w_overflow" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_overflow",
+    evidenceId: overflowEv2.evidenceId,
+    kind: "idle",
+    text: "#999 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 999,
+      commit: "999aaaa",
+      verifiedCommit: "999aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/대상 이슈가 확정되지 않아/);
+  expect(prefs.read().judgments.w_overflow).toMatchObject({
+    kind: "review",
     verificationPending: true,
     verificationTarget: { repo: "acme/easydocs", issues: [] },
   });

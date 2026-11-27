@@ -165,6 +165,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 25차 `06c1c23` 지적 2건 반영)**:
   1. **단일 대상 이슈 제한**: `server/coordinator.ts`에서 검증 대기(`review`) 생성 시 복수 대상 이슈(예: `#308 및 #999`)를 동시에 고정하려는 호출을 fail-closed 거절하고, 레거시/직접 `idle` 경로에서도 복수 대상 이슈가 묶여 있으면 단일 영수증만으로 해제하지 못하도록 차단했습니다.
   2. **이슈 번호 범위 통일 및 쓰기 전 스키마 검증**: `server/preferences.ts`에 `MAX_ISSUE_NUMBER = 2147483647`을 공유 상수로 두고 `extractAnchoredIssues`에 같은 상한을 적용했으며, `verificationTargetSchema.parse` 및 `PreferenceStore.change`의 `schema.parse` 쓰기 전 검증을 추가해 범위 밖 번호(`#2147483648` 등)로 설정 파일이 손상되지 않도록 보장했습니다.
+- **2026-11-27 (독립 의도 리뷰 26차 `78c05d6` 지적 2건 반영)**:
+  1. **대상 미확정(`issues: []`) 검증 대기의 후속 대화 우회 차단**: `verifyIdleClassification`에서 `previousVerificationTarget`이 존재하면 `issues`가 비어 있더라도 후속 대화의 이슈로 폴백하지 않고 자동 `idle` 전환을 fail-closed 거절(사람 `saveNote` 확인 경로)하도록 수정했습니다.
+  2. **모든 `verificationTarget` 신규 생성 경로에 단일 대상 제한 일원화**: `review`뿐 아니라 활성 `agent-note` 등에서 `question`·추가 질문 설명 경로로 새 `verificationTarget`이 생성될 때도 복수 이슈(`issues.length > 1`) 저장을 동일하게 거절합니다.
 
 ## Acceptance criteria
 
