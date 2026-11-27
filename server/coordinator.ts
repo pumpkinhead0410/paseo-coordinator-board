@@ -23,7 +23,16 @@ function carriedQuestions(judgment?: Preferences["judgments"][string]): OpenQues
   return judgment?.openQuestions ?? (judgment?.openQuestion ? [judgment.openQuestion] : []);
 }
 
-type QuestionTarget = { evidenceId?: string; cursor?: string; answerAfter?: string; text: string; noteRevision?: number };
+type QuestionTarget = {
+  evidenceId?: string;
+  cursor?: string;
+  answerAfter?: string;
+  issues?: number[];
+  text: string;
+  needsInput?: string;
+  content?: {needsInput?: string};
+  noteRevision?: number;
+};
 
 function questionStillNeedsInput(needs: string[], question: QuestionTarget, questions: QuestionTarget[], verificationPending = false) {
   return needs.some(sentence => {
@@ -38,6 +47,7 @@ function hasQuestionAnswer(
   question: QuestionTarget,
   answers: QuestionAnswer[],
   questions: QuestionTarget[],
+  verificationPending: boolean,
   allowMissingNoteRevision = false,
 ): boolean {
   const {evidenceId, noteRevision} = question;
@@ -45,19 +55,17 @@ function hasQuestionAnswer(
   // Older reports have no saved cursor. Recover only an exact visible evidence boundary.
   const cursor = question.cursor ?? latest.evidencePositions?.get(evidenceId);
   if (!cursor) return false;
+  const needsInputDeclared = !!(question.needsInput ?? question.content?.needsInput);
   return answers.some(answer => {
     if (answer.questionEvidenceId !== evidenceId ||
       (answer.noteRevision !== noteRevision && !(allowMissingNoteRevision && answer.noteRevision === undefined))) return false;
     const reply = latest.userReplies?.find(turn => turn.replyId === answer.replyId);
     if (!reply || reply.truncated) return false;
     if (!followsCursor(reply.replyId, cursor) || (question.answerAfter && !followsCursor(reply.replyId, question.answerAfter))) return false;
-    const turnIndex = latest.turns.findIndex(turn => turn.replyId === answer.replyId);
-    if (turnIndex < 0) return true;
-    for (const turn of latest.turns.slice(turnIndex + 1)) {
-      if (turn.role === "user") break;
-      if (questionStillNeedsInput(remainingHumanNeeds(turn.text, false), question, questions)) return false;
-    }
-    return true;
+    const responses = latest.replyResponses?.get(answer.replyId) ?? [];
+    // A renewed request for declared inputs contradicts a claim that this reply supplied them all.
+    return !responses.some(turn => turn.truncated ||
+      questionStillNeedsInput(remainingHumanNeeds(turn.text, needsInputDeclared), question, questions, verificationPending));
   });
 }
 
@@ -98,10 +106,8 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     if (!withdrawalEvidencePattern.test(sentence)) return false;
     if (tentativeOrNegatedWithdrawalPattern.test(sentence)) return false;
     if (separateTaskWithdrawalPattern.test(sentence)) return false;
-    if (anchoredIssues.size > 0) {
-      const mentioned = extractAnchoredIssues(sentence);
-      if (mentioned.size > 0 && [...mentioned].every(id => !anchoredIssues.has(id))) return false;
-    }
+    const mentioned = extractAnchoredIssues(sentence);
+    if ([...mentioned].some(id => !anchoredIssues.has(id))) return false;
     return true;
   });
   if (withdrawalSentences.length === 0) return false;
@@ -146,7 +152,8 @@ function withdrawalTarget(
   const stillNeeded = keepReview
     ? questionStillNeedsInput(remainingHumanNeeds(last.text), target, questions, verificationPending)
     : hasRemainingHumanNeed(last.text);
-  return stillNeeded || !hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, target.text)
+  const targetIssues = target.issues ? new Set(target.issues) : anchoredIssues;
+  return stillNeeded || !hasConfirmedWithdrawalForTarget(last.text, targetIssues, target.text)
     ? "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없습니다."
     : target;
 }
@@ -234,6 +241,7 @@ export async function verifyIdleClassification(
     previousVerificationPending?: boolean;
     previousVerificationTarget?: VerificationTarget;
     previousQuestionCursor?: string;
+    previousQuestionIssues?: number[];
     previousOpenQuestions?: OpenQuestionState[];
     previousEvidenceId?: string;
     previousText?: string;
@@ -285,6 +293,7 @@ export async function verifyIdleClassification(
   questions.push(...context.previousOpenQuestions ?? []);
   if (context.previousKind === "question") questions.push({
     evidenceId: context.previousEvidenceId, cursor: context.previousQuestionCursor,
+    issues: context.previousQuestionIssues, needsInput: context.previousNeedsInput,
     text: [context.previousText, context.previousQuestion, context.previousNeedsInput].filter(Boolean).join(" "),
   });
   if (context.hasActiveAgentNote && context.activeNoteKind === "question") questions.push({
@@ -295,7 +304,7 @@ export async function verifyIdleClassification(
   const hasOpenQuestion = questions.length > 0;
   const sameQuestionEvidence = questions.some(question => question.evidenceId === latest.id);
   const requiresReceipt = !!input.receipt || hasVerificationWait || claimsCompletion;
-  const answered = (question: QuestionTarget) => hasQuestionAnswer(latest, question, answers, questions, questions.length === 1);
+  const answered = (question: QuestionTarget) => hasQuestionAnswer(latest, question, answers, questions, hasVerificationWait, questions.length === 1);
 
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
@@ -309,7 +318,7 @@ export async function verifyIdleClassification(
       if (questions.length > 1) return "각 열린 질문에 대한 사용자 답변 근거를 별도로 지목하세요.";
       return "열린 질문을 철회로 해제하려면 닫으려는 질문의 targetEvidenceId(활성 보고가 있으면 targetNoteRevision 포함)를 담은 withdrawn 영수증(receipt)을 제출하세요.";
     }
-    const withdrawn = withdrawalTarget(input.receipt, latest, questions, anchoredIssues, false);
+    const withdrawn = withdrawalTarget(input.receipt, latest, questions, effectiveAnchoredIssues, false);
     if (typeof withdrawn === "string") return withdrawn;
     if (!questions.every(question => question === withdrawn || answered(question))) {
       return "각 열린 질문에 대한 사용자 답변 근거를 별도로 지목하세요.";
@@ -376,7 +385,7 @@ export async function verifyIdleClassification(
     }
     // A completion summary can imply withdrawal only when there is one possible target.
     const singleWithdrawal = questions.length === 1 && !answers.length &&
-      hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, questions[0].text);
+      hasConfirmedWithdrawalForTarget(last.text, new Set(questions[0].issues ?? effectiveAnchoredIssues), questions[0].text);
     if (!singleWithdrawal && !questions.every(answered)) {
       return "열린 질문(question)에 대한 사용자 답변 또는 질문 철회 근거가 확인되지 않아 완료 영수증만으로 idle 전환할 수 없습니다. 열린 질문과 needsInput을 유지하세요.";
     }
@@ -576,6 +585,7 @@ export function attachCoordinatorTools(
             previousVerificationPending: beforePreviousSameProject?.verificationPending,
             previousVerificationTarget: beforePreviousSameProject?.verificationTarget,
             previousQuestionCursor: beforePreviousSameProject?.questionCursor,
+            previousQuestionIssues: beforePreviousSameProject?.questionIssues,
             previousOpenQuestions: beforeJudgmentOpenQuestions,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
@@ -638,16 +648,14 @@ export function attachCoordinatorTools(
           latestNote?.origin === "agent" &&
           latestNote.kind !== "clear" &&
           !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, latestNote, scope);
-        const liveAnchoredIssues = computeAnchoredIssues(
-          latest,
-          {
-            sessionTitle: row.title,
-            workspaceTitle: row.workspaceTitle,
-            previousText: previousSameProject?.text,
-            activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
-          },
-          true,
-        );
+        const issueContext = {
+          sessionTitle: row.title,
+          workspaceTitle: row.workspaceTitle,
+          previousText: previousSameProject?.text,
+          activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
+        };
+        const liveAnchoredIssues = computeAnchoredIssues(latest, issueContext, true);
+        const withdrawalIssues = new Set(previousSameProject?.verificationTarget?.issues ?? computeAnchoredIssues(latest, issueContext));
         const inputIssues = extractAnchoredIssues(input.text);
         const hasLiveAnchoredIssue =
           (previousSameProject?.verificationTarget?.issues.length ?? 0) > 0 ||
@@ -776,6 +784,7 @@ export function attachCoordinatorTools(
         if (previousSameProject?.kind === "question") {
           pending.push({
             evidenceId: previousSameProject.evidenceId, cursor: previousSameProject.questionCursor,
+            issues: previousSameProject.questionIssues,
             text: [previousSameProject.text, previousSameProject.content?.question, previousSameProject.content?.needsInput]
               .filter(Boolean).join(" ").slice(0, 2400),
             content: previousSameProject.content,
@@ -793,7 +802,7 @@ export function attachCoordinatorTools(
           let withdrawn: QuestionTarget | undefined;
           if (input.receipt?.kind === "withdrawn" && reviewWithdrawal) {
             if (isClarificationReply) throw new Error("추가 질문 설명은 철회·취소 근거로 사용할 수 없습니다.");
-            const target = withdrawalTarget(input.receipt, latest, questions, liveAnchoredIssues, true, nextVerificationPending);
+            const target = withdrawalTarget(input.receipt, latest, questions, withdrawalIssues, true, nextVerificationPending);
             if (typeof target === "string") throw new Error(target);
             withdrawn = target;
             if (target === activeQuestionNote && latestNote?.evidenceId) {
@@ -808,18 +817,21 @@ export function attachCoordinatorTools(
               const cursor = question.cursor ?? latest.evidencePositions?.get(question.evidenceId);
               const hasLaterReply = latest.userReplies?.some(reply => followsCursor(reply.replyId, cursor) &&
                 (!question.answerAfter || followsCursor(reply.replyId, question.answerAfter)));
-              if (hasLaterReply && questionStillNeedsInput(remainingNeeds, question, questions)) {
+              if (hasLaterReply && questionStillNeedsInput(remainingNeeds, question, questions, nextVerificationPending)) {
                 // A reply observed before the renewed request cannot later stand in for the missing input.
                 return [{...question, answerAfter: latest.cursor ?? question.answerAfter}];
               }
-              return hasQuestionAnswer(latest, question, answers, questions) ? [] : [question];
+              return hasQuestionAnswer(latest, question, answers, questions, nextVerificationPending) ? [] : [question];
             });
           }
         }
         const parsedJudgment = judgment.parse(input);
         let requestedAt = input.kind === "question" ? new Date().toISOString() : undefined;
         let questionCursor = input.kind === "question" ? latest.cursor : undefined;
+        let questionIssues: number[] | undefined;
         if (input.kind === "question") {
+          const issueAnchors = previousSameProject?.verificationTarget || withdrawalIssues.size ? withdrawalIssues : liveAnchoredIssues;
+          questionIssues = [...issueAnchors].sort((a, b) => a - b).slice(0, 20);
           const sameEvidence = pending.find(q => q.evidenceId === input.evidenceId);
           if (sameEvidence) {
             const question = parsedJudgment.content?.question ?? parsedJudgment.text;
@@ -832,6 +844,7 @@ export function attachCoordinatorTools(
             if (sameEvidence.content) parsedJudgment.content = {...sameEvidence.content, ...parsedJudgment.content};
             requestedAt = sameEvidence.requestedAt ?? requestedAt;
             questionCursor = sameEvidence.cursor ?? questionCursor;
+            questionIssues = sameEvidence.issues ?? questionIssues;
             pending = pending.filter(q => q !== sameEvidence);
           }
         }
@@ -841,6 +854,7 @@ export function attachCoordinatorTools(
           ...(nextVerificationPending ? { verificationPending: true } : {}),
           ...(nextVerificationTarget ? { verificationTarget: nextVerificationTarget } : {}),
           ...(questionCursor !== undefined ? { questionCursor } : {}),
+          ...(questionIssues !== undefined ? { questionIssues } : {}),
           ...(pending.length ? { openQuestions: pending } : {}),
           projectId: row.projectId,
           ...(requestedAt ? { requestedAt } : {}),

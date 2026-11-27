@@ -79,6 +79,7 @@ export const openQuestionStateSchema = z.object({
   userInputId: z.string().max(64).optional(), // Legacy records
   cursor: z.string().max(64).optional(),
   answerAfter: z.string().max(64).optional(),
+  issues: verificationTargetSchema.shape.issues.optional(),
   text: z.string().max(2400),
   content: decisionFields.optional(),
   question: z.string().trim().min(1).max(2000).optional(),
@@ -99,6 +100,7 @@ const storedJudgment = z.object({
   verificationTarget: verificationTargetSchema.optional(),
   questionUserInputId: z.string().max(64).optional(), // Legacy records
   questionCursor: z.string().max(64).optional(),
+  questionIssues: verificationTargetSchema.shape.issues.optional(),
   openQuestion: openQuestionStateSchema.optional(), // Legacy single-question record
   openQuestions: z.array(openQuestionStateSchema).optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),

@@ -19,7 +19,7 @@ import {
 } from "../../server/outcome-verifier";
 import { PreferenceStore } from "../../server/preferences";
 import { attachReportTool, recordReport } from "../../server/reporting";
-import { sessionClarificationCard } from "../../shared/clarifications";
+import { askClarification, sessionClarificationCard } from "../../shared/clarifications";
 import { reportingKey, type Note, type SessionRow } from "../../shared/contract";
 import { decisionCount, displayLane } from "../../shared/decision-count";
 import contribute from "../../index.server";
@@ -83,7 +83,7 @@ async function openIssueBoard(options: {
     { id: "w305", title: "[인계] #305 CE/UL 안전문·저작권 2단계", workspaceId: "wks_main", status: "idle", updatedAt: "2026-11-26T06:20:00Z", pendingPermissions: [] },
   ];
 
-  const timelines = new Map<string, (string | { role: "user" | "assistant"; text: string })[]>([
+  const timelines = new Map<string, (string | { role: "user" | "assistant"; text: string; messageId?: string })[]>([
     ["w308", ["#308 사진 교체 버튼 H1 확인을 e9fe346에 기록했습니다. 운영 세션의 실제 통합 결과 최종검증이 남았습니다."]],
     ["w303", ["#303 라이선스 검사 일정 미정으로 조사를 중단했고 GitHub에서 NOT_PLANNED로 닫힌 것을 확인했습니다."]],
     ["w305", ["#305 1단계 통합 완료. 2단계 AC-6 진행을 위해 공식 CE/UL 안전문 원문, 표지 이미지, 회사 저작권 치환 규칙을 알려 주세요."]],
@@ -151,7 +151,7 @@ async function openIssueBoard(options: {
                 timestamp: agents.find(a => a.id === id)?.updatedAt,
                 item: typeof entry === "string"
                   ? { type: "assistant_message", text: entry }
-                  : { type: entry.role === "user" ? "user_message" : "assistant_message", text: entry.text },
+                  : { type: entry.role === "user" ? "user_message" : "assistant_message", text: entry.text, messageId: entry.messageId },
               })).slice(-limit),
             };
           },
@@ -196,6 +196,8 @@ async function openIssueBoard(options: {
       snapshot: async () => boardSnapshot.output.parse(await handlers.get(boardSnapshot.name)!({fresh: true}, {paseo: sdk})),
       reply: async (input: unknown) => sendDecision.output.parse(
         await handlers.get(sendDecision.name)!(sendDecision.input.parse(input), {paseo: sdk})),
+      clarify: async (input: unknown) => askClarification.output.parse(
+        await handlers.get(askClarification.name)!(askClarification.input.parse(input), {paseo: sdk})),
     };
   }
 
@@ -206,7 +208,7 @@ function sessionTools(f: Awaited<ReturnType<typeof openIssueBoard>>, sessionId: 
   return {
     read: async () => JSON.parse(await f.run("read_board_conversation", {sessionId})),
     classify: (input: Record<string, unknown>) => f.run("classify_board_conversation", {sessionId, ...input}),
-    append: (...turns: (string | {role: "user"; text: string})[]) => {
+    append: (...turns: (string | {role: "user"; text: string; messageId?: string})[]) => {
       f.timelines.get(sessionId)!.push(...turns);
       const agent = f.agents.find(a => a.id === sessionId)!;
       agent.updatedAt = new Date(Date.parse(agent.updatedAt) + 1000).toISOString();
@@ -2302,4 +2304,109 @@ test("CHECK-6: full #305 resolution and reply retry are preserved", async () => 
   await f.classify({evidenceId: completed.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed,
     questionAnswer: {questionEvidenceId: original, replyId: completed.userReplies.at(-1).replyId}});
   expect(await f.card()).toBeUndefined();
+});
+
+test.each(["requested input", "reply outside display window"])("RECHECK-200: a partial reply remains incomplete: %s", async scenario => {
+  const f = await reviewFixture();
+  const id = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  f.append({role: "user", text: "표지 이미지는 cover.png입니다."},
+    scenario === "requested input" ? "표지 이미지는 기록했습니다. 공식 CE/UL 안전문 원문을 알려 주세요."
+      : "표지 이미지는 기록했습니다. 공식 CE/UL 안전문 원문은 여전히 필요합니다.");
+  if (scenario === "reply outside display window") f.append("빌드 상태를 확인했습니다.", "시험 기록을 정리했습니다.");
+  f.append(stageOneExcerpt);
+  const latest = await f.read();
+  const partial = latest.userReplies.at(-1).replyId;
+  if (scenario === "reply outside display window") {
+    expect(latest.turns).toHaveLength(4);
+    expect(latest.turns.some((turn: {replyId?: string}) => turn.replyId === partial)).toBe(false);
+  }
+  await expect(f.classify({evidenceId: latest.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed,
+    questionAnswer: {questionEvidenceId: id, replyId: partial}})).rejects.toThrow(/열린 질문/);
+  f.append({role: "user", text: "공식 안전문 원문과 저작권 규칙을 첨부했습니다."}, stageOneExcerpt);
+  const full = await f.read();
+  await f.classify({evidenceId: full.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed,
+    questionAnswer: {questionEvidenceId: id, replyId: full.userReplies.at(-1).replyId}});
+  expect(await f.card()).toBeUndefined();
+});
+
+test("RECHECK-201: a fully answered question stays closed while integration verification is pending", async () => {
+  const f = await reviewFixture();
+  const initial = await f.read();
+  await f.classify({evidenceId: initial.evidenceId, kind: "review", reviewKind: "verification", text: "#305 1단계 통합 검증 대기"});
+  f.append("표기 형식을 선택해 주세요.");
+  const id = await f.ask("표기 형식을 선택해 주세요.", "표기 형식");
+  await f.reply((await f.card())!.version, "recheck-full-format", "표준 형식으로 진행하세요.");
+  f.append({role: "user", text: "표준 형식으로 진행하세요."}, "표기 형식을 기록했습니다. #305 1단계 통합 검증은 아직 대기 중입니다.");
+  const latest = await f.read();
+  const questionAnswer = {questionEvidenceId: id, replyId: latest.userReplies.at(-1).replyId};
+  await f.classify({evidenceId: latest.evidenceId, kind: "review", text: "#305 1단계 통합 검증 대기", questionAnswer});
+  expect(f.prefs.read().judgments.w305.verificationPending).toBe(true);
+  expect(f.prefs.read().judgments.w305.openQuestions).toBeUndefined();
+  expect(await f.card()).toBeUndefined();
+  f.append(stageOneExcerpt);
+  const done = await f.read();
+  await f.classify({evidenceId: done.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed, questionAnswer});
+  expect(f.prefs.read().judgments.w305.kind).toBe("idle");
+});
+
+test("RECHECK-202: a different issue cannot withdraw a pinned question on review", async () => {
+  const f = await reviewFixture("wmisc");
+  f.append("#308 작업 결과를 검증 중입니다.");
+  const initial = await f.read();
+  await f.classify({evidenceId: initial.evidenceId, kind: "review", reviewKind: "verification", text: "통합 검증 대기"});
+  f.append("H1 사진 검토를 확인해 주세요.");
+  const id = await f.ask("H1 사진 검토 요청");
+  f.append("#999의 H1 사진 검토 요청이 취소됐습니다.");
+  const latest = await f.read();
+  const receipt = {kind: "withdrawn", targetEvidenceId: id, reason: "H1 취소"};
+  await expect(f.classify({evidenceId: latest.evidenceId, kind: "review", text: "통합 검증 대기", receipt})).rejects.toThrow(/철회·취소 근거/);
+  expect(await f.card()).toMatchObject({evidenceId: id});
+  expect(f.prefs.read().judgments.wmisc.verificationTarget?.issues).toEqual([308]);
+  f.append("#308의 H1 사진 검토 요청이 취소됐습니다.");
+  const correct = await f.read();
+  await f.classify({evidenceId: correct.evidenceId, kind: "review", text: "통합 검증 대기", receipt});
+  expect(await f.card()).toBeUndefined();
+  expect(f.prefs.read().judgments.wmisc.verificationPending).toBe(true);
+});
+
+test("RECHECK-203: a legacy answered version renews when the saved question still needs input", async () => {
+  const f = await reviewFixture();
+  const id = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  const v1 = (await f.card())!.version;
+  f.prefs.change(scope => {scope.answers.w305 = {version: v1};});
+  expect(await f.card()).toBeUndefined();
+  f.append({role: "user", text: "표지는 cover.png입니다."}, "표지를 기록했습니다. 공식 CE/UL 안전문 원문은 여전히 필요합니다.");
+  const latest = await f.read();
+  await f.classify({evidenceId: latest.evidenceId, kind: "review", text: "안전문 입력 대기"});
+  const renewed = await f.card();
+  expect(renewed).toMatchObject({evidenceId: id, needsInput: stageTwoInputs.needsInput});
+  expect(renewed!.version).not.toBe(v1);
+  await f.reply(renewed!.version, "legacy-reopen-reply", "공식 안전문 원문을 첨부합니다.");
+  expect(await f.card()).toBeUndefined();
+});
+
+test("RECHECK-204: clarification restores the renewed version and permits a subsequent answer", async () => {
+  const f = await reviewFixture();
+  const id = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  const v1 = (await f.card())!.version;
+  await f.reply(v1, "recheck-clarify-first", "표지 이미지는 cover.png입니다.");
+  f.append({role: "user", text: "표지 이미지는 cover.png입니다."}, "표지 이미지는 기록했습니다. 공식 CE/UL 안전문 원문을 알려 주세요.");
+  const renewed = (await f.card())!;
+  expect(renewed.version).not.toBe(v1);
+  const board = f.board();
+  const snapshot = await board.snapshot();
+  const row = snapshot.sessions.find(s => s.id === "w305")!;
+  const clarification = await board.clarify({card: sessionClarificationCard(row)!, recipientId: "w305",
+    question: "영문 원문과 국문 번역본 둘 다 필요한가요?", requestKey: "recheck-clarify-v2"});
+  f.append({role: "user", text: f.sent.at(-1)!.text, messageId: clarification.messageId}, "영문 원문만 있으면 충분합니다.");
+  expect(await f.card()).toMatchObject({evidenceId: id, version: renewed.version, needsInput: stageTwoInputs.needsInput});
+  await f.reply(renewed.version, "recheck-clarify-answer", "영문 안전문 원문을 첨부합니다.");
+  expect(await f.card()).toBeUndefined();
+  f.append({role: "user", text: "영문 안전문 원문을 첨부합니다."}, "안전문 원문은 기록했습니다. 회사 저작권 치환 규칙은 여전히 필요합니다.");
+  const again = (await f.card())!;
+  expect(again).toMatchObject({evidenceId: id});
+  expect(again.version).not.toBe(renewed.version);
+  await f.reply(again.version, "recheck-clarify-final", "회사 저작권 규칙을 첨부합니다.");
+  expect(await f.card()).toBeUndefined();
+  expect(f.sent).toHaveLength(4);
 });

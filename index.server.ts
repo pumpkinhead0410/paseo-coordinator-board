@@ -82,8 +82,8 @@ export default function contribute(server: PluginServerContext) {
     const visibleNotes = notes.visible(new Set(visible.map(s => s.id)));
     facts.decorate(visible, evidence, visibleNotes);
     for (const row of visible) {
-      decorateDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
-      restoreClarifiedDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
+      const question = decorateDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
+      restoreClarifiedDecision(row, visibleNotes[row.id], latest, evidence.get(row.id), question);
     }
     const selected = new Set(latest.projects);
     const pullRequests = {

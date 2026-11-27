@@ -88,14 +88,16 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
   }
   const baseVersion = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : questionEvidenceId ?? row.evidenceId, activeNote?.revision ?? 0, content]);
   const reply = content.source === "coordinator" ? answer?.questionReplies?.[baseVersion] : undefined;
-  const last = evidence?.turns.at(-1);
   const topic = [content.question, content.needsInput].filter(Boolean).join(" ");
-  const renewed = reply && (followsCursor(carried?.answerAfter, reply.cursor) ||
-    (!evidence?.laterInput && last?.role === "assistant" && !last.truncated &&
-      evidence?.userReplies?.some(turn => !turn.truncated && followsCursor(turn.replyId, reply.cursor)) &&
-      remainingHumanNeeds(last.text).some(sentence => sharesQuestionTopic(sentence, topic))));
-  const version = renewed ? hash([baseVersion, reply.version]) : baseVersion;
-  if (content.source !== "permission" && (!renewed && reply || hasDecisionAnswer(answer, version))) {
+  const laterReply = reply && evidence?.userReplies?.findLast(turn => !turn.truncated && followsCursor(turn.replyId, reply.cursor));
+  const responses = (laterReply?.replyId && evidence?.replyResponses?.get(laterReply.replyId)) || [];
+  const needsMore = !evidence?.laterInput && responses.some(turn => !turn.truncated &&
+    remainingHumanNeeds(turn.text).some(sentence => sharesQuestionTopic(sentence, topic)));
+  const renewal = reply
+    ? (followsCursor(carried?.answerAfter, reply.cursor) || needsMore ? reply.version : undefined)
+    : (content.source === "coordinator" && hasDecisionAnswer(answer, baseVersion) ? carried?.answerAfter : undefined);
+  const version = renewal ? hash([baseVersion, renewal]) : baseVersion;
+  if (content.source !== "permission" && (!renewal && reply || hasDecisionAnswer(answer, version))) {
     row.decisionAnswered = true;
     row.lane = "review";
     row.detail = "답장을 보냈습니다. 담당 세션의 결과를 기다립니다.";
@@ -108,7 +110,10 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
       }
     }
   }
-  return content.source === "coordinator" ? baseVersion : undefined;
+  if (content.source === "coordinator") {
+    const clarificationVersion = !renewal && reply ? hash([baseVersion, reply.version]) : version;
+    return {baseVersion, evidenceId: questionEvidenceId ?? row.evidenceId, clarificationVersion};
+  }
 }
 
 function requireScope(scope: Preferences, input: DecisionInput) {
@@ -214,10 +219,11 @@ export class DecisionSender {
       const judgment = current.judgments[row.id];
       if (verifiedBoardFact(row, evidence, current, note)) throw Error(changed);
       Object.assign(row, classify(evidence, row, judgment?.projectId === row.projectId ? judgment : undefined, row.id === current.coordinator), { evidenceId: evidence.id });
-      const questionVersion = decorateDecision(row, note, current, evidence);
-      const decorated = row.decision;
-      restoreClarifiedDecision(row, note, current, evidence);
+      const question = decorateDecision(row, note, current, evidence);
+      restoreClarifiedDecision(row, note, current, evidence, question);
       if (!row.decision || row.decision.source === "permission" || row.decision.version !== input.version) throw Error(changed);
+      const trackedQuestion = row.decision.source === "coordinator" && question &&
+        question.evidenceId === (row.decision.evidenceId ?? row.evidenceId);
       text = sessionReplyMessage(row,input);
       if (input.images?.length) this.sessionPhotos.save(input.recipientId, messageId, input.images);
       current.decisionReceipts[messageId] = {
@@ -228,7 +234,7 @@ export class DecisionSender {
           ...(input.images?.length ? {imageCount:input.images.length} : {}),
           answer: input.text, recipientId: input.recipientId, coordinator: input.action === "coordinate" },
         fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version,
-        ...(questionVersion && row.decision === decorated && evidence.cursor ? {questionVersion, questionCursor: evidence.cursor} : {}),
+        ...(trackedQuestion && evidence.cursor ? {questionVersion: question.baseVersion, questionCursor: evidence.cursor} : {}),
         ...(note?.kind === "question" && (row.decision.source === "agent-note" || row.decision.source === "person-note") ? { noteRevision: note.revision } : {}),
       };
     });
