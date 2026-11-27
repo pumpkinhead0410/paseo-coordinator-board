@@ -16,19 +16,33 @@ const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)
 const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|CI|D155|회귀|단위\s*시험|검증\s*자료|manifest\.json|영수증|SHA-256).{0,32}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
 const nonIssueStatusPattern = /(?:GitHub\s+Actions|\bActions\b|workflow|워크플로(?:우)?|\bchecks?\b|체크|\bjobs?\b|\bpipeline\b|파이프라인|\b(?:pull\s*request|PR)\b(?:\s*#\d+)?|\/pull\/\d+|\bCI\b(?:\s*(?:실행|상태|워크플로|체크|잡))?|빌드|\bbuild\b|배포|\bdeployment\b|세션|\bsession\b)/i;
 const issueRefToken = String.raw`(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)`;
-const completedClosurePattern = new RegExp(
+const issueRefList = String.raw`${issueRefToken}(?:\s*(?:·|,|과|와|및)\s*${issueRefToken})*`;
+const completedClosureMatchPattern = new RegExp(
   [
-    String.raw`(?:GitHub(?:\s*(?:에서|이슈(?:\s*${issueRefToken})?|issue(?:\s*${issueRefToken})?|${issueRefToken}))?|이슈(?:\s*${issueRefToken})?|issue(?:\s*${issueRefToken})?|${issueRefToken}|stateReason|종료\s*사유)\s*(?:가|는|를|이|은|:|=)?\s*(?:로|으로)?\s*\bCOMPLETED\b`,
-    String.raw`\bCOMPLETED\b(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)|확인)`,
-    String.raw`(?:이슈(?:\s*${issueRefToken})?|${issueRefToken})(?:가|는|를|이|은)?\s*완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
+    String.raw`(?:GitHub(?:\s*에서)?\s*)?(?:이슈\s*|issue\s*)?${issueRefList}\s*(?:가|는|를|이|은|:|=)?\s*(?:(?:GitHub(?:\s*에서)?\s*)?(?:로|으로)?\s*\bCOMPLETED\b(?:\s*(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)?|확인))?|완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+[Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee][Dd]\b)`,
+    String.raw`(?:GitHub(?:\s*에서)?(?:\s*(?:이슈|issue))?|이슈|issue|stateReason|종료\s*사유)\s*(?:가|는|를|이|은|:|=)?\s*(?:로|으로)?\s*(?:\bCOMPLETED\b(?:\s*(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)?|확인))?|완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)))`,
+    String.raw`\bCOMPLETED\b(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
     String.raw`\bclosed\s+as\s+[Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee][Dd]\b`,
   ].join("|"),
+  "g",
 );
 const openOrProposalPattern = /\bOPEN\b|열려\s*있|닫을까요|종료할까요|닫는\s*것을\s*제안|종료를\s*제안|제안합니다|\b(?:still\s+open|propose\s+closing|should\s+we\s+close)\b/i;
-const confirmedNotPlannedPattern = /(?:\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+not_planned\b)/i;
+const notPlannedClosureMatchPattern = new RegExp(
+  [
+    String.raw`(?:GitHub(?:\s*에서)?\s*)?(?:이슈\s*|issue\s*)?${issueRefList}\s*(?:가|는|를|이|은|:|=)?\s*(?:(?:GitHub(?:\s*에서)?\s*)?\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+[Nn][Oo][Tt]_[Pp][Ll][Aa][Nn][Nn][Ee][Dd]\b)`,
+    String.raw`(?:GitHub(?:\s*에서)?\s*)?\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
+    String.raw`\bclosed\s+as\s+[Nn][Oo][Tt]_[Pp][Ll][Aa][Nn][Nn][Ee][Dd]\b`,
+  ].join("|"),
+  "g",
+);
+const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 const cleanupClausePattern = /(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계|폴더\s*정리|브랜치\s*정리|사용\s*종료|정리(?:는|를|가|의)?\s*(?:아직|별도|보류|추후|미진행)|cleanup|local\s+branch|active\s+use)/i;
 const productEvidenceClausePattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|회귀|\bCI\b|D155|GitHub|\bCOMPLETED\b|\bNOT_PLANNED\b|원격\s*main|main\s*(?:에\s*)?(?:통합|반영|병합|머지|포함))/i;
 const clauseConnectorSplitPattern = /(?<=(?:했고|하고|했으며|하며|했지만|하지만|했으나|하나|하였고|하였으며|하였지만|하였으나|하였는데|됐고|되고|됐지만|됐으나|됐는데|되었고|되었으나|되었지만|되었으며|되었는데|했는데|하는데|상태이나|상태이지만|완료했고|확인했고|통과했고|닫혔고|종료됐고|종료되었고|중단했고|중단했으나|보류하지만|보류했으나|보류했고|보류하고|보류하며|보류했으며|보류했지만|남겨두지만|유지하지만|\band\b|\bbut\b|\bwhile\b|\bhowever\b))\s+/i;
+
+function stripReferenceMentions(text: string): string {
+  return text.replace(referenceIssuePattern, " ");
+}
 
 function extractRepoIssueRefs(text: string): { issues: Set<string>; repos: Set<string> } {
   const withoutPr = text
@@ -62,32 +76,49 @@ function productOutcomeClauses(text: string): string[] {
     .filter(clause => clause.length > 0 && !(cleanupClausePattern.test(clause) && !productEvidenceClausePattern.test(clause)));
 }
 
+type ClosureClaim = { issues: Set<string>; repos: Set<string> };
+
+function extractClosureClaims(clauses: string[], pattern: RegExp): ClosureClaim[] {
+  const claims: ClosureClaim[] = [];
+  for (const clause of clauses) {
+    if (openOrProposalPattern.test(clause)) continue;
+    for (const match of clause.matchAll(pattern)) {
+      const start = match.index ?? 0;
+      const matched = match[0];
+      const rawPrefix = clause.slice(Math.max(0, start - 24), start);
+      const localPrefix = rawPrefix.replace(/^.*(?:별개로|대신|외에|말고|제외하고|이고|이나|이며|및|,|;|·)\s*/i, "");
+      const rawSuffix = clause.slice(start + matched.length, start + matched.length + 28);
+      const localSuffix = rawSuffix.split(/(?:(?:와|과)\s+|및\s+|하고\s+|했고\s+|했지만\s+|했으나\s+)/)[0] ?? "";
+      if (nonIssueStatusPattern.test(`${localPrefix}${matched}`)) continue;
+      if (negatedOutcomePattern.test(`${matched}${localSuffix}`)) continue;
+      const refs = extractRepoIssueRefs(matched);
+      claims.push(refs);
+    }
+  }
+  return claims;
+}
+
 function closureCoversTargets(
-  closureUnits: string[],
+  claims: ClosureClaim[],
   targetIssues: Set<string>,
   lastText: string,
   expectedRepo?: string,
 ): boolean {
-  if (closureUnits.length === 0) return false;
-  const validUnits = closureUnits.filter(u => {
-    const { repos } = extractRepoIssueRefs(u);
-    return [...repos].every(repo => repoMatchesExpected(repo, expectedRepo));
-  });
-  if (validUnits.length === 0) return false;
+  const validClaims = claims.filter(claim => [...claim.repos].every(repo => repoMatchesExpected(repo, expectedRepo)));
+  if (validClaims.length === 0) return false;
 
-  const { issues: allTextIssues, repos: allTextRepos } = extractRepoIssueRefs(lastText);
+  const { issues: allTextIssues, repos: allTextRepos } = extractRepoIssueRefs(stripReferenceMentions(lastText));
   if (targetIssues.size === 0) {
     return [...allTextRepos].every(repo => repoMatchesExpected(repo, expectedRepo));
   }
 
   const coveredExplicit = new Set<string>();
   let hasUnnumberedClosure = false;
-  for (const unit of validUnits) {
-    const { issues } = extractRepoIssueRefs(unit);
-    if (issues.size === 0) {
+  for (const claim of validClaims) {
+    if (claim.issues.size === 0) {
       hasUnnumberedClosure = true;
     } else {
-      for (const id of issues) coveredExplicit.add(id);
+      for (const id of claim.issues) coveredExplicit.add(id);
     }
   }
   if ([...targetIssues].every(id => coveredExplicit.has(id))) return true;
@@ -131,17 +162,13 @@ export function unverifiedIdleReason(
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
   }
 
-  const anchorText = [
-    context.previousText ?? "",
-    context.activeNoteText ?? "",
-    context.sessionTitle ?? "",
-    context.workspaceTitle ?? "",
-  ].join(" ");
-  const anchored = extractRepoIssueRefs(anchorText);
-  const inputRefs = extractRepoIssueRefs(inputText);
-  const expectedRepo = context.expectedRepo ?? (anchored.repos.size === 1 ? [...anchored.repos][0] : undefined);
+  const structuralRefs = extractRepoIssueRefs(stripReferenceMentions(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`));
+  const proseAnchorRefs = extractRepoIssueRefs(stripReferenceMentions(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`));
+  const inputRefs = extractRepoIssueRefs(stripReferenceMentions(inputText));
+  const anchoredRepos = structuralRefs.repos.size > 0 ? structuralRefs.repos : proseAnchorRefs.repos;
+  const expectedRepo = context.expectedRepo ?? (anchoredRepos.size === 1 ? [...anchoredRepos][0] : undefined);
 
-  let targetIssues = anchored.issues;
+  let targetIssues = structuralRefs.issues.size > 0 ? structuralRefs.issues : proseAnchorRefs.issues;
   if (targetIssues.size > 0 && inputRefs.issues.size > 0 && [...inputRefs.issues].some(id => !targetIssues.has(id))) {
     return "분류 입력의 이슈 번호가 대상 세션의 이슈와 일치하지 않아 idle로 분류할 수 없습니다. 대상 저장소와 이슈 번호를 확인하세요.";
   }
@@ -150,17 +177,15 @@ export function unverifiedIdleReason(
   }
   if (targetIssues.size === 0) {
     const nonClosureText = clauses
-      .filter(c => !completedClosurePattern.test(c) && !confirmedNotPlannedPattern.test(c))
+      .filter(c => extractClosureClaims([c], completedClosureMatchPattern).length === 0 && extractClosureClaims([c], notPlannedClosureMatchPattern).length === 0)
       .join(" ");
-    targetIssues = extractRepoIssueRefs(nonClosureText).issues;
+    targetIssues = extractRepoIssueRefs(stripReferenceMentions(nonClosureText)).issues;
   }
 
   if (mentionsNotPlanned) {
     const hasProblem = clauses.some(c => openOrProposalPattern.test(c) || negatedOutcomePattern.test(c) || /[?？]/.test(c));
-    const notPlannedClosureUnits = clauses.filter(
-      c => confirmedNotPlannedPattern.test(c) && !nonIssueStatusPattern.test(c) && !negatedOutcomePattern.test(c),
-    );
-    const hasConfirmed = closureCoversTargets(notPlannedClosureUnits, targetIssues, last.text, expectedRepo);
+    const notPlannedClaims = extractClosureClaims(clauses, notPlannedClosureMatchPattern);
+    const hasConfirmed = closureCoversTargets(notPlannedClaims, targetIssues, last.text, expectedRepo);
     if (hasProblem || !hasConfirmed) {
       return "NOT_PLANNED 종료가 확정되지 않았거나 대상 저장소·이슈와 일치하지 않거나 열린(OPEN)·제안·미확인 상태여서 idle로 분류할 수 없습니다. 대상 이슈의 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
     }
@@ -172,14 +197,8 @@ export function unverifiedIdleReason(
   const hasNegatedProductOutcome = clauses.some(c => negatedOutcomePattern.test(c) || openOrProposalPattern.test(c));
   const hasMainCommit = clauses.some(c => commitShaPattern.test(c) && mainIntegrationTargetPattern.test(c) && !negatedOutcomePattern.test(c));
   const hasVerification = clauses.some(c => verificationReceiptPattern.test(c) && !negatedOutcomePattern.test(c));
-  const completedClosureUnits = clauses.filter(
-    c =>
-      completedClosurePattern.test(c) &&
-      !nonIssueStatusPattern.test(c) &&
-      !openOrProposalPattern.test(c) &&
-      !negatedOutcomePattern.test(c),
-  );
-  const hasClosure = closureCoversTargets(completedClosureUnits, targetIssues, last.text, expectedRepo);
+  const completedClaims = extractClosureClaims(clauses, completedClosureMatchPattern);
+  const hasClosure = closureCoversTargets(completedClaims, targetIssues, last.text, expectedRepo);
   if (pendingInSource || hasNegatedProductOutcome || !hasMainCommit || !hasVerification || !hasClosure) {
     return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·대상 저장소·이슈의 GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·대상 이슈의 GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
   }

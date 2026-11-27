@@ -150,7 +150,7 @@ test("#308 reproduction: running session rejects stale classification with actio
 
   // 1. Pre-integration state: worker reported H1 review note (bound to initial evidenceId) and coordinator classified review wait.
   const initialExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
-  expect(recordReport(notes, "w308", { kind: "review", text: "#308 사람 확인 H1" }, initialExcerpt.evidenceId).isError).not.toBe(true);
+  expect(recordReport(notes, "w308", { kind: "review", text: "#308 사람 확인 H1 (참고 이슈 #999)" }, initialExcerpt.evidenceId).isError).not.toBe(true);
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: initialExcerpt.evidenceId,
@@ -235,6 +235,7 @@ test("#308 reproduction: running session rejects stale classification with actio
     ["2026-11-26T05:58:56Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. other/EasyDocs#308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
     ["2026-11-26T05:58:57Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. https://github.com/other/unrelated/issues/308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
     ["2026-11-26T05:58:58Z", "#999 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999 COMPLETED 확인.", "#999 통합 완료"],
+    ["2026-11-26T05:58:59Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. #308과 별개로 GitHub 이슈 #999는 COMPLETED로 닫혔습니다.", "#308 cf6f661 원격 main 통합 완료"],
   ] as const) {
     w308.updatedAt = ts;
     timelines.get("w308")!.push(text);
@@ -269,10 +270,10 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + same-sentence cleanup hold with modifier ("확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다")!
+  // 3. Worker finishes /done with integration receipt + CI pass in same clause as COMPLETED + same-sentence cleanup hold with modifier!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. GitHub #308 COMPLETED 종료와 CI 통과를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
