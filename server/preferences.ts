@@ -78,6 +78,8 @@ export const openQuestionStateSchema = z.object({
   evidenceId: z.string().min(1).max(64),
   userInputId: z.string().max(64).optional(), // Legacy records
   cursor: z.string().max(64).optional(),
+  answerAfter: z.string().max(64).optional(),
+  issues: verificationTargetSchema.shape.issues.optional(),
   text: z.string().max(2400),
   content: decisionFields.optional(),
   question: z.string().trim().min(1).max(2000).optional(),
@@ -98,6 +100,7 @@ const storedJudgment = z.object({
   verificationTarget: verificationTargetSchema.optional(),
   questionUserInputId: z.string().max(64).optional(), // Legacy records
   questionCursor: z.string().max(64).optional(),
+  questionIssues: verificationTargetSchema.shape.issues.optional(),
   openQuestion: openQuestionStateSchema.optional(), // Legacy single-question record
   openQuestions: z.array(openQuestionStateSchema).optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
@@ -134,7 +137,11 @@ const schema = z.object({
   excludedProviders: z.array(z.string().min(1).max(256)).default([]),
   usageRouting: z.boolean().default(true),
   routingRevision: z.number().int().nonnegative().default(0),
-  answers: z.record(z.string(), z.object({ version: z.string(), noteRevision: z.number().optional() })).default({}),
+  answers: z.record(z.string(), z.object({
+    version: z.string(), noteRevision: z.number().optional(),
+    versions: z.record(z.string(), z.literal(true)).optional(),
+    questionReplies: z.record(z.string(), z.object({version: z.string(), cursor: z.string()})).optional(),
+  })).default({}),
   clarifications:z.record(z.string(),clarificationEntry.extend({
     card:clarificationCard,fingerprint:z.string(),bodyHash:z.string(),sourceSessionId:z.string().nullable(),
     savedDecision:decisionSchema.optional(),noteRevision:z.number().optional(),sourceEvidenceId:z.string().optional(), sourceRequestedAt:z.string().optional(),
@@ -144,6 +151,7 @@ const schema = z.object({
     messageHash:z.string().regex(/^[a-f0-9]{64}$/).optional(),
     fingerprint: z.string(), sessionId: z.string(), version: z.string(), status: z.enum(["pending", "sent"]),
     evidenceId: z.string().optional(),
+    questionVersion: z.string().optional(), questionCursor: z.string().optional(),
     noteRevision: z.number().optional(), beforeAnswer: z.string().optional(), messageId: z.string().optional(),
   })).default({}),
   pendingCoordinator: z.object({
@@ -155,6 +163,10 @@ const schema = z.object({
   }).optional(),
 });
 export type Preferences = z.infer<typeof schema>;
+
+export function hasDecisionAnswer(answer: Preferences["answers"][string] | undefined, version: string) {
+  return answer?.version === version || answer?.versions?.[version] === true;
+}
 
 export function isManagedCoordinator(scope: Preferences, id: string | null) {
   return id !== null && scope.createdCoordinator?.id === id;

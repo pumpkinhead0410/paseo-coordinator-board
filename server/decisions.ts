@@ -7,12 +7,13 @@ import { createHash } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { Decision, DecisionInput } from "../shared/decision-actions";
 import type { Note, SessionRow } from "../shared/contract";
-import { classify, ConversationReader, lastConversationQuestion, type Evidence } from "./conversation";
+import { classify, ConversationReader, followsCursor, lastConversationQuestion, type Evidence } from "./conversation";
 import { isCurrentMembership, managedSessions } from "./session-links";
 import { canReceiveBoardInput, discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
 import { verifiedBoardFact } from "./board-facts";
-import { isManagedCoordinator, type Preferences, type PreferenceStore } from "./preferences";
+import { hasDecisionAnswer, isManagedCoordinator, type Preferences, type PreferenceStore } from "./preferences";
+import { remainingHumanNeeds, sharesQuestionTopic } from "./question-needs";
 
 type Sdk = PluginHandlerContext["paseo"];
 type Receipt = { ok: true; recipientId: string; messageId: string };
@@ -85,8 +86,18 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
     if (answeredNote && !row.nativePending) row.decisionAnswered = true;
     return;
   }
-  const version = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : questionEvidenceId ?? row.evidenceId, activeNote?.revision ?? 0, content]);
-  if (content.source !== "permission" && answer?.version === version) {
+  const baseVersion = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : questionEvidenceId ?? row.evidenceId, activeNote?.revision ?? 0, content]);
+  const reply = content.source === "coordinator" ? answer?.questionReplies?.[baseVersion] : undefined;
+  const topic = [content.question, content.needsInput].filter(Boolean).join(" ");
+  const laterReply = reply && evidence?.userReplies?.findLast(turn => !turn.truncated && followsCursor(turn.replyId, reply.cursor));
+  const responses = (laterReply?.replyId && evidence?.replyResponses?.get(laterReply.replyId)) || [];
+  const needsMore = !evidence?.laterInput && responses.some(turn => !turn.truncated &&
+    remainingHumanNeeds(turn.text).some(sentence => sharesQuestionTopic(sentence, topic)));
+  const renewal = reply
+    ? (followsCursor(carried?.answerAfter, reply.cursor) || needsMore ? reply.version : undefined)
+    : (content.source === "coordinator" && hasDecisionAnswer(answer, baseVersion) ? carried?.answerAfter : undefined);
+  const version = renewal ? hash([baseVersion, renewal]) : baseVersion;
+  if (content.source !== "permission" && (!renewal && reply || hasDecisionAnswer(answer, version))) {
     row.decisionAnswered = true;
     row.lane = "review";
     row.detail = "답장을 보냈습니다. 담당 세션의 결과를 기다립니다.";
@@ -98,6 +109,10 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
         row.decision.questionMarkdown = excerpt.markdown;
       }
     }
+  }
+  if (content.source === "coordinator") {
+    const clarificationVersion = !renewal && reply ? hash([baseVersion, reply.version]) : version;
+    return {baseVersion, evidenceId: questionEvidenceId ?? row.evidenceId, clarificationVersion};
   }
 }
 
@@ -204,9 +219,11 @@ export class DecisionSender {
       const judgment = current.judgments[row.id];
       if (verifiedBoardFact(row, evidence, current, note)) throw Error(changed);
       Object.assign(row, classify(evidence, row, judgment?.projectId === row.projectId ? judgment : undefined, row.id === current.coordinator), { evidenceId: evidence.id });
-      decorateDecision(row, note, current, evidence);
-      restoreClarifiedDecision(row, note, current, evidence);
+      const question = decorateDecision(row, note, current, evidence);
+      restoreClarifiedDecision(row, note, current, evidence, question);
       if (!row.decision || row.decision.source === "permission" || row.decision.version !== input.version) throw Error(changed);
+      const trackedQuestion = row.decision.source === "coordinator" && question &&
+        question.evidenceId === (row.decision.evidenceId ?? row.evidenceId);
       text = sessionReplyMessage(row,input);
       if (input.images?.length) this.sessionPhotos.save(input.recipientId, messageId, input.images);
       current.decisionReceipts[messageId] = {
@@ -217,7 +234,8 @@ export class DecisionSender {
           ...(input.images?.length ? {imageCount:input.images.length} : {}),
           answer: input.text, recipientId: input.recipientId, coordinator: input.action === "coordinate" },
         fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version,
-        ...(note?.kind === "question" && !row.decision.evidenceId ? { noteRevision: note.revision } : {}),
+        ...(trackedQuestion && evidence.cursor ? {questionVersion: question.baseVersion, questionCursor: evidence.cursor} : {}),
+        ...(note?.kind === "question" && (row.decision.source === "agent-note" || row.decision.source === "person-note") ? { noteRevision: note.revision } : {}),
       };
     });
     try {
@@ -235,7 +253,15 @@ export class DecisionSender {
       delivery.status = "sent";
       if (requestId !== messageId) current.decisionReceipts[requestId] = { ...delivery, messageId };
       if (input.action === "reply" && current.projects.includes(input.projectId) && current.answers[input.sessionId]?.version === delivery.beforeAnswer) {
-        current.answers[input.sessionId] = { version: input.version, noteRevision: delivery.noteRevision };
+        const previous = current.answers[input.sessionId];
+        const versions = {...previous?.versions, ...(previous ? {[previous.version]: true as const} : {})};
+        const questionReplies = {...previous?.questionReplies};
+        if (delivery.questionVersion && delivery.questionCursor) {
+          questionReplies[delivery.questionVersion] = {version: input.version, cursor: delivery.questionCursor};
+        }
+        current.answers[input.sessionId] = {
+          version: input.version, noteRevision: delivery.noteRevision ?? previous?.noteRevision, versions, questionReplies,
+        };
       }
     });
   }

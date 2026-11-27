@@ -17,7 +17,7 @@ import type { SessionRow, Note } from "../shared/contract";
 import type { Evidence } from "./conversation";
 import { isCurrentMembership, managedSessions } from "./session-links";
 import { canReceiveBoardInput, discoverSessions, permissionVersion } from "./discovery";
-import { isManagedCoordinator } from "./preferences";
+import { hasDecisionAnswer, isManagedCoordinator } from "./preferences";
 
 type Sdk = PluginHandlerContext["paseo"];
 type Stored = Preferences["clarifications"][string];
@@ -64,12 +64,12 @@ export function restoreClarifiedDecision(
   note: Note | undefined,
   prefs: Preferences,
   evidence?: Evidence,
+  openQuestion?: {evidenceId?: string; clarificationVersion: string},
 ) {
   if (
     row.nativePending ||
     row.status === "closed" ||
     row.status === "error" ||
-    row.decisionAnswered ||
     !evidence ||
     evidence.laterInput
   )
@@ -77,6 +77,10 @@ export function restoreClarifiedDecision(
   for (const id of evidence.lastInputIds ?? []) {
     const record = prefs.clarifications?.[id];
     const original = record && sourceQuestion(record.card);
+    const savedQuestionEvidenceId = record?.savedDecision?.evidenceId ?? record?.sourceEvidenceId;
+    const sameOpenQuestion = record?.savedDecision?.source === "coordinator" &&
+      !!openQuestion?.evidenceId && savedQuestionEvidenceId === openQuestion.evidenceId &&
+      record.savedDecision.version === openQuestion.clarificationVersion;
     if (
       !record?.savedDecision ||
       !original ||
@@ -84,13 +88,16 @@ export function restoreClarifiedDecision(
       original.sessionId !== row.id ||
       original.version !== record.savedDecision.version ||
       record.recipientId !== row.id ||
-      prefs.answers[row.id]?.version === original.version ||
+      (row.decisionAnswered && !sameOpenQuestion) ||
+      (record.savedDecision.source === "coordinator" && !!openQuestion && !sameOpenQuestion) ||
+      hasDecisionAnswer(prefs.answers[row.id], original.version) ||
       (note?.revision ?? 0) !== record.noteRevision
     )
       continue;
     // Digest judgments classify the explanation turn. Its original decision stays
     // open until an answer, a new input, or a note revision supersedes it.
     delete row.agentNoteSuperseded;
+    delete row.decisionAnswered;
     row.decision = record.savedDecision;
     row.decisionRequestedAt = record.sourceRequestedAt;
     if (record.sourceEvidenceId) row.evidenceId = record.sourceEvidenceId;
@@ -279,7 +286,7 @@ export class ClarificationSender {
         if (
           !inScope(current, input.card) ||
           current.coordinator !== view.coordinator ||
-          (original && (current.answers[original.sessionId]?.version === original.version ||
+          (original && (hasDecisionAnswer(current.answers[original.sessionId], original.version) ||
             JSON.stringify(current.judgments[original.sessionId]) !== JSON.stringify(scope.judgments[original.sessionId]))) ||
           (source && !isCurrentMembership(source, current)) ||
           !(

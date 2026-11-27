@@ -15,7 +15,7 @@ import { boardDecisionCount, claimBoardQuotaNotice, boardScope, boardSnapshot, r
 import { canReceiveBoardInput, discoverSessions } from "./server/discovery";
 import { attachReportTool } from "./server/reporting";
 import { ConversationReader, excerpt } from "./server/conversation";
-import { isManagedCoordinator, setCoordinator, PreferenceStore } from "./server/preferences";
+import { hasDecisionAnswer, isManagedCoordinator, setCoordinator, PreferenceStore } from "./server/preferences";
 import { trackedReviewTool } from "./server/tracked-review";
 import { attachCoordinatorTools } from "./server/coordinator";
 import { createOperations } from "./server/operations";
@@ -86,8 +86,8 @@ export default function contribute(server: PluginServerContext) {
     const visibleNotes = notes.visible(new Set(visible.map(s => s.id)));
     facts.decorate(visible, evidence, visibleNotes);
     for (const row of visible) {
-      decorateDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
-      restoreClarifiedDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
+      const question = decorateDecision(row, visibleNotes[row.id], latest, evidence.get(row.id));
+      restoreClarifiedDecision(row, visibleNotes[row.id], latest, evidence.get(row.id), question);
     }
     const selected = new Set(latest.projects);
     const pullRequests = {
@@ -153,7 +153,7 @@ export default function contribute(server: PluginServerContext) {
         return [entry.recipientId];
       }
       const original = sourceQuestion(entry.card);
-      return original && entry.savedDecision && original.version !== scope.answers[original.sessionId]?.version
+      return original && entry.savedDecision && !hasDecisionAnswer(scope.answers[original.sessionId], original.version)
         ? [entry.recipientId] : [];
     }));
     // A running recipient may already have accepted a clarification, even

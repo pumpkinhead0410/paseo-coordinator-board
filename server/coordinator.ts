@@ -1,6 +1,6 @@
 import { defineAgentTool, type AgentToolDefinition, type PluginHandlerContext, type PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { ConversationReader, type Evidence } from "./conversation";
+import { ConversationReader, followsCursor, type Evidence } from "./conversation";
 import { isSupersededAgentNote } from "./decisions";
 import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
@@ -8,27 +8,12 @@ import type { NoteStore } from "./notes";
 import { createOutcomeVerifier, type OutcomeVerifier } from "./outcome-verifier";
 import { isManagedCoordinator, judgment, MAX_ISSUE_NUMBER, type Preferences, PreferenceStore, verificationTargetSchema, type CompletionReceipt, type OpenQuestionState, type VerificationTarget } from "./preferences";
 import { githubRepository } from "../shared/github-repository";
+import { extractTopicTokens, hasRemainingHumanNeed, questionSentences, referenceIssuePattern, remainingHumanNeeds, separateTaskWithdrawalPattern, sharesQuestionTopic } from "./question-needs";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
 const verificationReviewContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:최종\s*검증|통합\s*결과|통합\s*검증|커밋\s*검증|종료\s*사유|CI\s*(?:통과|체크|검증)|(?:통합|병합|머지|구현|검증|이슈|#\d+)\s*(?:완료|반영|종료|종결|대기)|\b(?:merged|integrated|completed|not_planned|ci\s+checks?|closing\s+commit|verification\s+pending)\b)/i;
 const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
 const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
-const separateTaskWithdrawalPattern = /(?:별도(?:의)?\s*(?:작업|요청|안건|이슈|문서|태스크)|별개(?:의)?\s*(?:작업|요청|안건|이슈|문서|태스크)|다른\s*(?:작업|요청|안건|이슈)|무관한\s*(?:작업|요청|안건|이슈)|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
-const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요(?!\s*(?:없|하지\s*않|치\s*않))|남아(?!\s*있지\s*않)|남았|대기(?!\s*(?:없|하지\s*않|중이?\s*아니)))|(?:판단|결정|확인|승인|자료|응답|규칙|원문|입력|답변)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요(?!\s*(?:없|하지\s*않|치\s*않))|남아\s*있(?!지\s*않)|남았|대기\s*중(?!이?\s*아니)|미확정|받지\s*못)|(?<!\bnot\s+)(?<!\bno\s+longer\s+)\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining)|awaiting\s+(?:user|human|input|decision|assets?))\b/i;
-const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
-
-function hasRemainingHumanNeed(lastText: string): boolean {
-  const sentences = lastText
-    .trim()
-    .split(/(?:\r?\n|(?<=[.!?。])\s+)/)
-    .map(s => s.trim())
-    .filter(Boolean);
-  return sentences.some(sentence => {
-    if (separateTaskWithdrawalPattern.test(sentence)) return false;
-    return remainingNeedPattern.test(sentence) || stillAskingPattern.test(sentence);
-  });
-}
-
 const questionAnswerSchema = z.object({questionEvidenceId: z.string().min(1), replyId: z.string().min(1), noteRevision: z.number().int().positive().optional()});
 type QuestionAnswer = z.infer<typeof questionAnswerSchema>;
 const questionAnswersSchema = z.union([questionAnswerSchema, z.array(questionAnswerSchema).min(1)]);
@@ -38,12 +23,31 @@ function carriedQuestions(judgment?: Preferences["judgments"][string]): OpenQues
   return judgment?.openQuestions ?? (judgment?.openQuestion ? [judgment.openQuestion] : []);
 }
 
-type QuestionTarget = { evidenceId?: string; cursor?: string; text: string; noteRevision?: number };
+type QuestionTarget = {
+  evidenceId?: string;
+  cursor?: string;
+  answerAfter?: string;
+  issues?: number[];
+  text: string;
+  needsInput?: string;
+  content?: {needsInput?: string};
+  noteRevision?: number;
+};
+
+function questionStillNeedsInput(needs: string[], question: QuestionTarget, questions: QuestionTarget[], verificationPending = false) {
+  return needs.some(sentence => {
+    if (sharesQuestionTopic(sentence, question.text)) return true;
+    if (verificationPending && verificationReviewContextPattern.test(sentence)) return false;
+    return !questions.some(other => other !== question && sharesQuestionTopic(sentence, other.text));
+  });
+}
 
 function hasQuestionAnswer(
   latest: Evidence,
   question: QuestionTarget,
   answers: QuestionAnswer[],
+  questions: QuestionTarget[],
+  verificationPending: boolean,
   allowMissingNoteRevision = false,
 ): boolean {
   const {evidenceId, noteRevision} = question;
@@ -51,44 +55,18 @@ function hasQuestionAnswer(
   // Older reports have no saved cursor. Recover only an exact visible evidence boundary.
   const cursor = question.cursor ?? latest.evidencePositions?.get(evidenceId);
   if (!cursor) return false;
-  const [epoch, seq] = cursor.split(":");
+  const needsInputDeclared = !!(question.needsInput ?? question.content?.needsInput);
   return answers.some(answer => {
     if (answer.questionEvidenceId !== evidenceId ||
       (answer.noteRevision !== noteRevision && !(allowMissingNoteRevision && answer.noteRevision === undefined))) return false;
     const reply = latest.userReplies?.find(turn => turn.replyId === answer.replyId);
     if (!reply || reply.truncated) return false;
-    const [replyEpoch, replySeq] = answer.replyId.split(":");
-    return epoch === replyEpoch && Number(replySeq) > Number(seq);
+    if (!followsCursor(reply.replyId, cursor) || (question.answerAfter && !followsCursor(reply.replyId, question.answerAfter))) return false;
+    const responses = latest.replyResponses?.get(answer.replyId) ?? [];
+    // A renewed request for declared inputs contradicts a claim that this reply supplied them all.
+    return !responses.some(turn => turn.truncated ||
+      questionStillNeedsInput(remainingHumanNeeds(turn.text, needsInputDeclared), question, questions, verificationPending));
   });
-}
-
-const genericTopicStopwords = new Set([
-  "이슈", "사람", "확인", "요청", "질문", "대기", "진행", "위해", "제공", "알려", "주세요",
-  "부탁드립니다", "관련", "참고", "사용자", "철회", "취소", "남은", "결정", "없음", "필요",
-  "판단", "합니다", "했습니다", "있나요", "통합", "완료", "종료", "기다립니다", "있습니다",
-  "입니다", "것을", "위한", "대한", "에서", "으로", "까지", "부터", "하며", "하고", "했고",
-  "issue", "user", "request", "question", "waiting", "please", "confirm", "check", "withdrawn", "cancelled", "canceled",
-]);
-
-function extractTopicTokens(text: string): Set<string> {
-  const cleaned = text
-    .replace(referenceIssuePattern, " ")
-    .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+\b/gi, " ")
-    .replace(/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/g, " ");
-  const tokens = new Set<string>();
-  for (const raw of cleaned.match(/[0-9A-Za-z가-힣]+(?:-[0-9A-Za-z가-힣]+)*/g) ?? []) {
-    const normalized = raw
-      .toLowerCase()
-      .replace(/(?:에서는|에서도|으로는|으로도|에서|에게|까지|부터|으로|은|는|이|가|을|를|의|에|로|와|과|도|만)$/, "");
-    if (
-      normalized.length < 2 ||
-      /^\d+$/.test(normalized) ||
-      genericTopicStopwords.has(normalized) ||
-      /^(?:확인|철회|취소|대기|종료|완료|진행)(?:했|됐|되었|합니|됩니|입니|됨|함)/.test(normalized)
-    ) continue;
-    tokens.add(normalized);
-  }
-  return tokens;
 }
 
 const comparisonOrPriorCommitPattern = /(?:비교\s*대상|예전\s*커밋|이전\s*커밋|기존\s*커밋|전\s*커밋|구\s*커밋|참고\s*커밋|직전\s*커밋|재현\s*로그|로그(?:는|를|가|에서)|기준으로\s*확보|\b(?:previous|older|prior|baseline)\s+commit\b|\brepro(?:duction)?\s+log\b|\bcompared\s+(?:to|with)\b|\binstead\s+of\b)/i;
@@ -123,20 +101,13 @@ function matchesQuestionTopic(sentenceTokens: Set<string>, questionTokens: Set<s
 }
 
 function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>, openQuestionText: string): boolean {
-  const trimmed = lastText.trim();
-  if (!trimmed || stillAskingPattern.test(trimmed) || remainingNeedPattern.test(trimmed)) return false;
-  const sentences = trimmed
-    .split(/(?:\r?\n|(?<=[.!?。])\s+)/)
-    .map(s => s.trim())
-    .filter(Boolean);
+  const sentences = questionSentences(lastText);
   const withdrawalSentences = sentences.filter(sentence => {
     if (!withdrawalEvidencePattern.test(sentence)) return false;
     if (tentativeOrNegatedWithdrawalPattern.test(sentence)) return false;
     if (separateTaskWithdrawalPattern.test(sentence)) return false;
-    if (anchoredIssues.size > 0) {
-      const mentioned = extractAnchoredIssues(sentence);
-      if (mentioned.size > 0 && [...mentioned].every(id => !anchoredIssues.has(id))) return false;
-    }
+    const mentioned = extractAnchoredIssues(sentence);
+    if ([...mentioned].some(id => !anchoredIssues.has(id))) return false;
     return true;
   });
   if (withdrawalSentences.length === 0) return false;
@@ -159,7 +130,33 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     return matchesQuestionTopic(extractTopicTokens(sentence), questionTokens);
   });
 }
-const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
+
+function withdrawalTarget(
+  receipt: Extract<CompletionReceipt, {kind: "withdrawn"}>,
+  latest: Evidence,
+  questions: QuestionTarget[],
+  anchoredIssues: Set<number>,
+  keepReview: boolean,
+  verificationPending = false,
+): QuestionTarget | string {
+  const targets = questions.filter(question => question.evidenceId === receipt.targetEvidenceId);
+  if (!targets.length) return `철회 영수증의 targetEvidenceId(${receipt.targetEvidenceId})가 열린 질문의 근거와 일치하지 않습니다.`;
+  const target = targets.find(question => question.noteRevision === receipt.targetNoteRevision);
+  if (!target) return `철회 영수증의 targetNoteRevision(${receipt.targetNoteRevision ?? "없음"})이 열린 질문의 판본과 일치하지 않습니다.`;
+  const last = latest.turns.at(-1);
+  const targetCursor = target.cursor ?? latest.evidencePositions?.get(receipt.targetEvidenceId);
+  if (latest.laterInput || last?.role !== "assistant" || last.truncated ||
+      target.evidenceId === latest.id || (targetCursor && !followsCursor(latest.cursor, targetCursor))) {
+    return "열린 질문 이후의 최신 철회·취소 근거를 확인하세요.";
+  }
+  const stillNeeded = keepReview
+    ? questionStillNeedsInput(remainingHumanNeeds(last.text), target, questions, verificationPending)
+    : hasRemainingHumanNeed(last.text);
+  const targetIssues = target.issues ? new Set(target.issues) : anchoredIssues;
+  return stillNeeded || !hasConfirmedWithdrawalForTarget(last.text, targetIssues, target.text)
+    ? "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없습니다."
+    : target;
+}
 
 function extractAnchoredIssues(text: string): Set<number> {
   const cleaned = text
@@ -244,6 +241,7 @@ export async function verifyIdleClassification(
     previousVerificationPending?: boolean;
     previousVerificationTarget?: VerificationTarget;
     previousQuestionCursor?: string;
+    previousQuestionIssues?: number[];
     previousOpenQuestions?: OpenQuestionState[];
     previousEvidenceId?: string;
     previousText?: string;
@@ -263,7 +261,8 @@ export async function verifyIdleClassification(
   },
   verifier: OutcomeVerifier,
 ): Promise<string | null> {
-  if (context.isClarificationReply) return null;
+  if (context.isClarificationReply) return input.receipt?.kind === "withdrawn"
+    ? "추가 질문 설명은 철회·취소 근거로 사용할 수 없습니다." : null;
   const last = latest.turns.at(-1);
   const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
   const hasPinnedVerificationTarget = context.previousVerificationTarget !== undefined;
@@ -294,6 +293,7 @@ export async function verifyIdleClassification(
   questions.push(...context.previousOpenQuestions ?? []);
   if (context.previousKind === "question") questions.push({
     evidenceId: context.previousEvidenceId, cursor: context.previousQuestionCursor,
+    issues: context.previousQuestionIssues, needsInput: context.previousNeedsInput,
     text: [context.previousText, context.previousQuestion, context.previousNeedsInput].filter(Boolean).join(" "),
   });
   if (context.hasActiveAgentNote && context.activeNoteKind === "question") questions.push({
@@ -302,10 +302,9 @@ export async function verifyIdleClassification(
   });
   const answers = input.questionAnswer ? [input.questionAnswer].flat() : [];
   const hasOpenQuestion = questions.length > 0;
-  const openQuestionText = questions.map(q => q.text).join(" ");
   const sameQuestionEvidence = questions.some(question => question.evidenceId === latest.id);
   const requiresReceipt = !!input.receipt || hasVerificationWait || claimsCompletion;
-  const answered = (question: QuestionTarget) => hasQuestionAnswer(latest, question, answers, questions.length === 1);
+  const answered = (question: QuestionTarget) => hasQuestionAnswer(latest, question, answers, questions, hasVerificationWait, questions.length === 1);
 
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
@@ -319,14 +318,8 @@ export async function verifyIdleClassification(
       if (questions.length > 1) return "각 열린 질문에 대한 사용자 답변 근거를 별도로 지목하세요.";
       return "열린 질문을 철회로 해제하려면 닫으려는 질문의 targetEvidenceId(활성 보고가 있으면 targetNoteRevision 포함)를 담은 withdrawn 영수증(receipt)을 제출하세요.";
     }
-    const {targetEvidenceId, targetNoteRevision} = input.receipt;
-    const targets = questions.filter(question => question.evidenceId === targetEvidenceId);
-    if (!targets.length) return `철회 영수증의 targetEvidenceId(${targetEvidenceId})가 열린 질문의 근거와 일치하지 않습니다.`;
-    const withdrawn = targets.find(question => question.noteRevision === targetNoteRevision);
-    if (!withdrawn) return `철회 영수증의 targetNoteRevision(${targetNoteRevision ?? "없음"})이 열린 질문의 판본과 일치하지 않습니다.`;
-    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, withdrawn.text)) {
-      return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
-    }
+    const withdrawn = withdrawalTarget(input.receipt, latest, questions, effectiveAnchoredIssues, false);
+    if (typeof withdrawn === "string") return withdrawn;
     if (!questions.every(question => question === withdrawn || answered(question))) {
       return "각 열린 질문에 대한 사용자 답변 근거를 별도로 지목하세요.";
     }
@@ -355,16 +348,7 @@ export async function verifyIdleClassification(
     if (hasVerificationWait || claimsCompletion) {
       return "미해결 통합·검증 대기(review)나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 질문이 철회됐더라도 검증 대기는 review로 유지하고, 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
-    if (context.hasActiveAgentNote && context.activeNoteEvidenceId && receipt.targetEvidenceId !== context.activeNoteEvidenceId) {
-      return `철회 영수증의 targetEvidenceId(${receipt.targetEvidenceId})가 열린 보고의 근거(${context.activeNoteEvidenceId})와 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
-    }
-    if (context.hasActiveAgentNote && receipt.targetNoteRevision !== context.activeNoteRevision) {
-      return `철회 영수증의 targetNoteRevision(${receipt.targetNoteRevision ?? "없음"})이 열린 보고 판본(${context.activeNoteRevision})과 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
-    }
-    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, openQuestionText)) {
-      return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
-    }
-    return null;
+    return "철회 영수증의 targetEvidenceId가 열린 질문의 근거와 일치하지 않습니다.";
   }
 
   if (!context.expectedRepo) {
@@ -401,7 +385,7 @@ export async function verifyIdleClassification(
     }
     // A completion summary can imply withdrawal only when there is one possible target.
     const singleWithdrawal = questions.length === 1 && !answers.length &&
-      hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, questions[0].text);
+      hasConfirmedWithdrawalForTarget(last.text, new Set(questions[0].issues ?? effectiveAnchoredIssues), questions[0].text);
     if (!singleWithdrawal && !questions.every(answered)) {
       return "열린 질문(question)에 대한 사용자 답변 또는 질문 철회 근거가 확인되지 않아 완료 영수증만으로 idle 전환할 수 없습니다. 열린 질문과 needsInput을 유지하세요.";
     }
@@ -537,11 +521,15 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. When a user reply resolves an open question, compare its content with all requested inputs and cite questionAnswer:{questionEvidenceId,replyId} from the open question and observed userReplies. For simultaneous questions cite an array, with noteRevision on the agent-note citation. One targeted withdrawn receipt may be combined with citations for other questions. Keep questions open when the response is partial or unrelated. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. When a user reply resolves an open question, compare its content with all requested inputs and cite questionAnswer:{questionEvidenceId,replyId} from the open question and observed userReplies. For simultaneous questions cite an array, with noteRevision on the agent-note citation. On review, a targeted withdrawn receipt closes only its cited question and preserves other questions and verification waits. On idle, it may accompany answers for all other questions. Keep questions open when the response is partial or unrelated. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string(), questionAnswer: questionAnswersSchema.optional() }),
     async execute(input, { paseo, agent }) {
       if (input.kind !== "review" && input.reviewKind !== undefined) {
         throw new Error("reviewKind는 kind: 'review'일 때만 지정할 수 있습니다.");
+      }
+      const reviewWithdrawal = input.kind === "review" && input.receipt?.kind === "withdrawn";
+      if (input.kind !== "idle" && input.receipt !== undefined && !reviewWithdrawal) {
+        throw new Error("완료 receipt는 kind: 'idle', 열린 질문의 withdrawn은 review 또는 idle에서 지정할 수 있습니다.");
       }
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
       const row = rows.find(r => r.id === input.sessionId);
@@ -583,12 +571,12 @@ export function attachCoordinatorTools(
 
       let verifiedExpectedRepo: string | undefined;
       let afterWorkspaceRepo: string | undefined;
-      if (input.kind === "idle") {
+      if (input.kind === "idle" || reviewWithdrawal) {
         const savedRepo = Object.hasOwn(beforeScope.projectRepositories, row.projectId) ? beforeScope.projectRepositories[row.projectId] : undefined;
         verifiedExpectedRepo = savedRepo?.mode === "manual"
           ? savedRepo.repo
           : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(wsBefore?.gitRuntime?.remoteUrl) ?? undefined);
-        const rejection = await verifyIdleClassification(
+        const rejection = input.kind === "idle" ? await verifyIdleClassification(
           latest,
           input,
           {
@@ -597,6 +585,7 @@ export function attachCoordinatorTools(
             previousVerificationPending: beforePreviousSameProject?.verificationPending,
             previousVerificationTarget: beforePreviousSameProject?.verificationTarget,
             previousQuestionCursor: beforePreviousSameProject?.questionCursor,
+            previousQuestionIssues: beforePreviousSameProject?.questionIssues,
             previousOpenQuestions: beforeJudgmentOpenQuestions,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
@@ -615,7 +604,7 @@ export function attachCoordinatorTools(
             isClarificationReply: beforeIsClarificationReply,
           },
           verifier,
-        );
+        ) : null;
         if (rejection) throw new Error(rejection);
         const wsAfter = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
         const assertStableRow = async () => {
@@ -659,16 +648,14 @@ export function attachCoordinatorTools(
           latestNote?.origin === "agent" &&
           latestNote.kind !== "clear" &&
           !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, latestNote, scope);
-        const liveAnchoredIssues = computeAnchoredIssues(
-          latest,
-          {
-            sessionTitle: row.title,
-            workspaceTitle: row.workspaceTitle,
-            previousText: previousSameProject?.text,
-            activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
-          },
-          true,
-        );
+        const issueContext = {
+          sessionTitle: row.title,
+          workspaceTitle: row.workspaceTitle,
+          previousText: previousSameProject?.text,
+          activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
+        };
+        const liveAnchoredIssues = computeAnchoredIssues(latest, issueContext, true);
+        const withdrawalIssues = new Set(previousSameProject?.verificationTarget?.issues ?? computeAnchoredIssues(latest, issueContext));
         const inputIssues = extractAnchoredIssues(input.text);
         const hasLiveAnchoredIssue =
           (previousSameProject?.verificationTarget?.issues.length ?? 0) > 0 ||
@@ -684,7 +671,7 @@ export function attachCoordinatorTools(
           hasActiveAgentNote: !!liveActiveAgentNote,
           hasAnchoredIssue: hasLiveAnchoredIssue,
         });
-        if (input.kind === "idle") {
+        if (input.kind === "idle" || reviewWithdrawal) {
           if (latestNote?.revision !== beforeNoteRevision) {
             throw new Error("분류 검증 중 세션 보고가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
           }
@@ -797,6 +784,7 @@ export function attachCoordinatorTools(
         if (previousSameProject?.kind === "question") {
           pending.push({
             evidenceId: previousSameProject.evidenceId, cursor: previousSameProject.questionCursor,
+            issues: previousSameProject.questionIssues,
             text: [previousSameProject.text, previousSameProject.content?.question, previousSameProject.content?.needsInput]
               .filter(Boolean).join(" ").slice(0, 2400),
             content: previousSameProject.content,
@@ -806,15 +794,44 @@ export function attachCoordinatorTools(
         }
         const lastTurn = latest.turns.at(-1);
         if (input.kind === "idle" && !isClarificationReply) pending = [];
-        else if (input.questionAnswer && lastTurn?.role === "assistant" && !lastTurn.truncated &&
-          !latest.laterInput && !isClarificationReply && !hasRemainingHumanNeed(lastTurn.text)) {
-          const answers = [input.questionAnswer].flat();
-          pending = pending.filter(question => !hasQuestionAnswer(latest, question, answers));
+        else {
+          const activeQuestionNote: QuestionTarget | undefined = liveActiveAgentNote && latestNote?.kind === "question"
+            ? {evidenceId: latestNote.evidenceId, cursor: latestNote.questionCursor, text: latestNote.text, noteRevision: latestNote.revision}
+            : undefined;
+          const questions: QuestionTarget[] = activeQuestionNote ? [...pending, activeQuestionNote] : pending;
+          let withdrawn: QuestionTarget | undefined;
+          if (input.receipt?.kind === "withdrawn" && reviewWithdrawal) {
+            if (isClarificationReply) throw new Error("추가 질문 설명은 철회·취소 근거로 사용할 수 없습니다.");
+            const target = withdrawalTarget(input.receipt, latest, questions, withdrawalIssues, true, nextVerificationPending);
+            if (typeof target === "string") throw new Error(target);
+            withdrawn = target;
+            if (target === activeQuestionNote && latestNote?.evidenceId) {
+              scope.supersededAgentNotes[row.id] = {projectId: row.projectId, revision: latestNote.revision, evidenceId: latestNote.evidenceId};
+            }
+          }
+          if (lastTurn?.role === "assistant" && !lastTurn.truncated && !latest.laterInput && !isClarificationReply) {
+            const answers = input.questionAnswer ? [input.questionAnswer].flat() : [];
+            const remainingNeeds = remainingHumanNeeds(lastTurn.text);
+            pending = pending.flatMap(question => {
+              if (question === withdrawn) return [];
+              const cursor = question.cursor ?? latest.evidencePositions?.get(question.evidenceId);
+              const hasLaterReply = latest.userReplies?.some(reply => followsCursor(reply.replyId, cursor) &&
+                (!question.answerAfter || followsCursor(reply.replyId, question.answerAfter)));
+              if (hasLaterReply && questionStillNeedsInput(remainingNeeds, question, questions, nextVerificationPending)) {
+                // A reply observed before the renewed request cannot later stand in for the missing input.
+                return [{...question, answerAfter: latest.cursor ?? question.answerAfter}];
+              }
+              return hasQuestionAnswer(latest, question, answers, questions, nextVerificationPending) ? [] : [question];
+            });
+          }
         }
         const parsedJudgment = judgment.parse(input);
         let requestedAt = input.kind === "question" ? new Date().toISOString() : undefined;
         let questionCursor = input.kind === "question" ? latest.cursor : undefined;
+        let questionIssues: number[] | undefined;
         if (input.kind === "question") {
+          const issueAnchors = previousSameProject?.verificationTarget || withdrawalIssues.size ? withdrawalIssues : liveAnchoredIssues;
+          questionIssues = [...issueAnchors].sort((a, b) => a - b).slice(0, 20);
           const sameEvidence = pending.find(q => q.evidenceId === input.evidenceId);
           if (sameEvidence) {
             const question = parsedJudgment.content?.question ?? parsedJudgment.text;
@@ -827,6 +844,7 @@ export function attachCoordinatorTools(
             if (sameEvidence.content) parsedJudgment.content = {...sameEvidence.content, ...parsedJudgment.content};
             requestedAt = sameEvidence.requestedAt ?? requestedAt;
             questionCursor = sameEvidence.cursor ?? questionCursor;
+            questionIssues = sameEvidence.issues ?? questionIssues;
             pending = pending.filter(q => q !== sameEvidence);
           }
         }
@@ -836,6 +854,7 @@ export function attachCoordinatorTools(
           ...(nextVerificationPending ? { verificationPending: true } : {}),
           ...(nextVerificationTarget ? { verificationTarget: nextVerificationTarget } : {}),
           ...(questionCursor !== undefined ? { questionCursor } : {}),
+          ...(questionIssues !== undefined ? { questionIssues } : {}),
           ...(pending.length ? { openQuestions: pending } : {}),
           projectId: row.projectId,
           ...(requestedAt ? { requestedAt } : {}),
