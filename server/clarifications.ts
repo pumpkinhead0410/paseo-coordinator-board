@@ -90,6 +90,7 @@ export function restoreClarifiedDecision(
       continue;
     // Digest judgments classify the explanation turn. Its original decision stays
     // open until an answer, a new input, or a note revision supersedes it.
+    delete row.agentNoteSuperseded;
     row.decision = record.savedDecision;
     row.decisionRequestedAt = record.sourceRequestedAt;
     if (record.sourceEvidenceId) row.evidenceId = record.sourceEvidenceId;

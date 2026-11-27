@@ -1,7 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { decisionSchema } from "./decision-actions";
-import { pullRequestViewSchema } from "./prs";
+import { pullRequestViewSchema, repositorySlug } from "./prs";
 import { trackedDecisionViewSchema } from "./tracked-decisions";
 import { factSchema } from "./board-facts";
 
@@ -17,6 +17,8 @@ const session = z.object({
   title: z.string(),
   projectId: z.string(),
   projectTitle: z.string(),
+  projectRepo: repositorySlug.optional(),
+  workspaceId: z.string().optional(),
   workspaceTitle: z.string(),
   workspacePull: workspacePullSchema.optional(),
   sourceProjectId: z.string().optional(),
@@ -28,6 +30,7 @@ const session = z.object({
   evidenceId: z.string().optional(),
   decision: decisionSchema.optional(),
   decisionAnswered: z.boolean().optional(),
+  agentNoteSuperseded: z.boolean().optional(),
   boardFact: factSchema.extend({ current: z.boolean() }).optional(),
   nativePending: z.boolean().optional(),
   permissionVersion: z.string().optional(),
@@ -40,6 +43,7 @@ export const noteSchema = z.object({
   sessionId,
   kind: noteKind,
   evidenceId: z.string().max(64).optional(),
+  questionCursor: z.string().max(64).optional(),
   origin: z.enum(["person", "agent"]).optional(),
   requestedAt: z.string().optional(),
   text: z.string().max(2000),

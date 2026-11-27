@@ -34,7 +34,15 @@ export const catalogModelSchema = z.object({
 });
 export const routePolicySchema = z.partialRecord(gradeSchema, z.array(routeChoiceSchema).min(1).max(12));
 export const skillNameSchema = z.string().trim().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/);
-export const workspaceChoiceSchema = z.object({ id: identifier, projectId, title: z.string() });
+export const workspaceKindSchema = z.enum(["directory", "worktree", "checkout", "local_checkout"]);
+export const workspaceChoiceSchema = z.object({
+  id: identifier,
+  projectId,
+  title: z.string(),
+  kind: workspaceKindSchema.optional(),
+  branch: z.string().min(1).optional(),
+  path: z.string().min(1).optional(),
+});
 export const dispatchInputSchema = z.strictObject({
   projectId, workspaceId: identifier, grade: workerGradeSchema,
   title: z.string().trim().min(1).max(160), prompt: z.string().trim().min(1).max(24000),

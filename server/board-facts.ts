@@ -33,8 +33,12 @@ export function verifiedBoardFact(row: SessionRow, evidence: Evidence, scope: Pr
   if (!kind) return null;
   if (Object.values(scope.decisionReceipts).some(receipt => receipt.sessionId === row.id &&
       (receipt.status === "pending" || receipt.evidenceId === evidence.id))) return null;
-  const judgment = scope.judgments[row.id];
-  if (judgment?.projectId === row.projectId && judgment.evidenceId === evidence.id &&
+  const saved = scope.judgments[row.id];
+  const judgment = saved?.projectId === row.projectId ? saved : undefined;
+  // Facts handle standalone turns. A saved question from an earlier turn is still open.
+  if (judgment && ((judgment.kind === "question" && judgment.evidenceId !== evidence.id) ||
+      (judgment.openQuestions?.length ?? judgment.openQuestion))) return null;
+  if (judgment?.evidenceId === evidence.id &&
       (judgment.kind !== "question" || judgment.text !== text || judgment.content?.needsInput || judgment.content?.recommendation || judgment.content?.options?.length ||
       (judgment.content?.question && judgment.content.question !== text))) return null;
   const sourceProjectId = row.sourceProjectId ?? row.projectId;
