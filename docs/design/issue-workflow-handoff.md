@@ -23,7 +23,7 @@ const plan = await plan_board_assignment({});
 // 2. 통합·다이제스트 시 잔존 판단·카드 기록 식별과 상태별 실패 처리
 const rows = await read_board_conversation({});
 // rows[i]: { id, projectId, workspaceId, workspaceTitle, title, status, activityAt,
-//            judgment?: { kind: "review", reviewKind?: "verification" | "general", verificationPending?: true, evidenceId: "..." },
+//            judgment?: { kind: "review", reviewKind?: "verification" | "general", verificationPending?: true, verificationTarget?: { repo?: "owner/easydocs", issues: [308] }, evidenceId: "..." },
 //            note?: { kind: "review", origin: "agent", revision: 1, evidenceId: "..." } }
 
 // 실행 중인 세션에 classify_board_conversation을 호출하면 재시도 지침이 포함된 오류를 반환
@@ -160,6 +160,8 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 23차 `ee7f8d7` 지적 2건 반영)**:
   1. **미해결 검증 대기의 질문 경유 보존(`verificationPending`)**: `server/preferences.ts`의 저장 판단에 서버 관리 플래그 `verificationPending?: boolean`을 추가하고 `server/coordinator.ts`에서 `review`→`question`(및 추가 질문 설명 `idle`) 전환 시에도 미해결 통합·검증 대기를 보존하도록 수정했습니다. 이로써 `review → question → withdrawn → idle` 경유로 영수증 검사를 우회할 수 없고, `reviewKind: "general"`로의 강등도 차단됩니다.
   2. **일반 검토(`general`)와 통합·검증 대기(`verification`)의 명시적 구분(`reviewKind`)**: `classify_board_conversation`의 `review` 판단에 선택 필드 `reviewKind: "general" | "verification"`을 도입했습니다. 이슈가 연결되거나(`anchoredIssues`) 통합·검증 맥락이 있는 세션의 `review`는 자동으로 `verification`(`verificationPending: true`)으로 기록되고 `general` 강등이 거절되는 반면, 이슈·통합과 무관한 일반 검토(예: 회의실 예약 시간 대조)는 `general`로 구분돼 최신 발췌 확인만으로 GitHub 영수증 없이 `idle` 해제가 가능합니다.
+- **2026-11-27 (독립 의도 리뷰 24차 `bbcdb49` 지적 1건 반영 — 검증 대기 대상 저장소·이슈 고정)**:
+  - `server/preferences.ts`·`server/coordinator.ts`에 서버 관리 `verificationTarget?: { repo?, issues }`를 추가해 검증 대기 생성 시점의 대상 저장소·이슈를 함께 고정 저장하고, 후속 `question`·`review`가 기존 `verificationTarget`을 덮어쓰지 못하게 했습니다. `idle` 검증 시 `verificationTarget`의 저장소·이슈와 일치하지 않는 타 이슈 영수증(예: `#308` 검증 대기 중 `#999` 질문·완료 영수증)은 fail-closed 거절됩니다.
 
 ## Acceptance criteria
 

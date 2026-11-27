@@ -1156,6 +1156,96 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     kind: "idle",
     text: "남은 일 없음",
   })).rejects.toThrow(/완료 영수증·검증 근거/);
+
+  // 10. A verification wait created on an untitled-issue session for `#308` MUST pin `verificationTarget: { repo, issues: [308] }` so a follow-up `#999` question and valid `#999` receipt CANNOT clear `#308`'s pending verification!
+  const wUntitled = {
+    id: "w_untitled",
+    title: "통합 점검 세션",
+    status: "idle",
+    projectId: "easydocs",
+    workspaceId: "wks_office",
+    updatedAt: "2026-11-26T07:20:00Z",
+    pendingPermissions: [],
+    labels: { coordinatorBoardParent: "coord" },
+  };
+  agents.push(wUntitled);
+  timelines.set("w_untitled", ["통합 결과 확인을 기다립니다."]);
+  const untitledEv1 = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: untitledEv1.evidenceId,
+    kind: "review",
+    text: "#308 최종 검증 대기",
+  });
+  expect(prefs.read().judgments.w_untitled).toMatchObject({
+    kind: "review",
+    reviewKind: "verification",
+    verificationPending: true,
+    verificationTarget: { repo: "acme/easydocs", issues: [308] },
+  });
+  wUntitled.updatedAt = "2026-11-26T07:21:00Z";
+  timelines.get("w_untitled")!.push("#999 일정 문의가 들어왔습니다.");
+  const untitledEv2 = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: untitledEv2.evidenceId,
+    kind: "question",
+    text: "#999 일정 문의",
+    content: { question: "#999 일정을 확인해 주세요", needsInput: "일정" },
+  });
+  expect(prefs.read().judgments.w_untitled).toMatchObject({
+    kind: "question",
+    verificationPending: true,
+    verificationTarget: { repo: "acme/easydocs", issues: [308] },
+  });
+  // Even with a fully verified `#999` GitHub completion, `#999`'s receipt MUST NOT clear `#308`'s pending verification!
+  issueStates.set("acme/easydocs#999", {
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    closing: { status: "commit", sha: "999aaaa000000000000000000000000000000000" },
+  });
+  commitStates.set("acme/easydocs@999aaaa", {
+    onMain: true,
+    resolvedSha: "999aaaa000000000000000000000000000000000",
+    checks: "passed",
+  });
+  wUntitled.updatedAt = "2026-11-26T07:22:00Z";
+  timelines.get("w_untitled")!.push("#999 999aaaa 원격 main 통합 완료. 다만 #308 검증 자료는 아직 도착하지 않았습니다.");
+  const untitledEv3 = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: untitledEv3.evidenceId,
+    kind: "idle",
+    text: "#999 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 999,
+      commit: "999aaaa",
+      verifiedCommit: "999aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/미해결 검증 대기의 대상 이슈\(#308\)/);
+  expect(prefs.read().judgments.w_untitled).toMatchObject({
+    kind: "question",
+    verificationPending: true,
+    verificationTarget: { repo: "acme/easydocs", issues: [308] },
+  });
+  // Valid `#308` receipt DOES clear `#308`'s pending verification!
+  wUntitled.updatedAt = "2026-11-26T07:23:00Z";
+  timelines.get("w_untitled")!.push("#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다.");
+  const untitledEv4 = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_untitled",
+    evidenceId: untitledEv4.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  });
+  expect(prefs.read().judgments.w_untitled.kind).toBe("idle");
+  expect(prefs.read().judgments.w_untitled.verificationPending).toBeUndefined();
+  expect(prefs.read().judgments.w_untitled.verificationTarget).toBeUndefined();
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

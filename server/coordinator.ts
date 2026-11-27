@@ -6,7 +6,7 @@ import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
 import { createOutcomeVerifier, type OutcomeVerifier } from "./outcome-verifier";
-import { isManagedCoordinator, judgment, PreferenceStore, type CompletionReceipt } from "./preferences";
+import { isManagedCoordinator, judgment, PreferenceStore, type CompletionReceipt, type VerificationTarget } from "./preferences";
 import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
@@ -197,6 +197,7 @@ export async function verifyIdleClassification(
     previousKind?: "question" | "review" | "idle";
     previousReviewKind?: "general" | "verification";
     previousVerificationPending?: boolean;
+    previousVerificationTarget?: VerificationTarget;
     previousEvidenceId?: string;
     previousText?: string;
     previousQuestion?: string;
@@ -217,8 +218,19 @@ export async function verifyIdleClassification(
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
   const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
-  const anchoredIssues = computeAnchoredIssues(latest, context, false);
-  const hasAnchoredIssue = anchoredIssues.size > 0;
+  const pinnedTargetIssues = context.previousVerificationTarget?.issues ?? [];
+  const anchoredIssues = computeAnchoredIssues(
+    latest,
+    {
+      sessionTitle: context.sessionTitle,
+      workspaceTitle: context.workspaceTitle,
+      previousText: context.previousVerificationPending && context.previousKind === "question" ? undefined : context.previousText,
+      activeNoteText: context.activeNoteText,
+    },
+    false,
+  );
+  const effectiveAnchoredIssues = pinnedTargetIssues.length > 0 ? new Set(pinnedTargetIssues) : anchoredIssues;
+  const hasAnchoredIssue = effectiveAnchoredIssues.size > 0;
   const hasVerificationWait = hasPriorVerificationWait({
     previousKind: context.previousKind,
     previousReviewKind: context.previousReviewKind,
@@ -307,12 +319,16 @@ export async function verifyIdleClassification(
   if (receipt.repo.toLowerCase() !== context.expectedRepo.toLowerCase()) {
     return `영수증 저장소(${receipt.repo})가 대상 프로젝트 저장소(${context.expectedRepo})와 일치하지 않아 idle로 분류할 수 없습니다.`;
   }
+  if (context.previousVerificationTarget?.repo && receipt.repo.toLowerCase() !== context.previousVerificationTarget.repo.toLowerCase()) {
+    return `영수증 저장소(${receipt.repo})가 미해결 검증 대기의 대상 저장소(${context.previousVerificationTarget.repo})와 일치하지 않아 idle로 분류할 수 없습니다.`;
+  }
 
-  if (anchoredIssues.size === 0) {
+  if (effectiveAnchoredIssues.size === 0) {
     return `세션 제목·워크스페이스·이전 판단·이전 대화에서 대상 이슈 번호를 확인할 수 없어 #${receipt.issue} 영수증을 대조할 수 없습니다.`;
   }
-  if (!anchoredIssues.has(receipt.issue)) {
-    return `영수증 이슈(#${receipt.issue})가 대상 세션의 이슈(${[...anchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
+  if (!effectiveAnchoredIssues.has(receipt.issue)) {
+    const label = pinnedTargetIssues.length > 0 ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
+    return `영수증 이슈(#${receipt.issue})가 ${label}(${[...effectiveAnchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
   }
 
   const issueOutcome = await verifier.verifyIssue(receipt.repo, receipt.issue);
@@ -421,6 +437,7 @@ export function attachCoordinatorTools(
                 evidenceId: matchedJudgment.evidenceId,
                 ...(matchedJudgment.reviewKind ? { reviewKind: matchedJudgment.reviewKind } : {}),
                 ...(matchedJudgment.verificationPending ? { verificationPending: true } : {}),
+                ...(matchedJudgment.verificationTarget ? { verificationTarget: matchedJudgment.verificationTarget } : {}),
               },
             } : {}),
             ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? { note: { kind: activeNote.kind, origin: activeNote.origin ?? "person", revision: activeNote.revision, ...(activeNote.evidenceId ? { evidenceId: activeNote.evidenceId } : {}) } } : {}),
@@ -477,15 +494,26 @@ export function attachCoordinatorTools(
       const beforeJudgmentKind = beforePreviousSameProject?.kind;
       const beforeJudgmentReviewKind = beforePreviousSameProject?.reviewKind;
       const beforeJudgmentVerificationPending = !!beforePreviousSameProject?.verificationPending;
+      const beforeJudgmentVerificationTarget = beforePreviousSameProject?.verificationTarget;
+
+      const needsWorkspaceRefresh =
+        !!row.workspaceId &&
+        (input.kind === "idle" ||
+          input.kind === "review" ||
+          beforeJudgmentVerificationPending ||
+          beforePreviousSameProject?.kind === "review" ||
+          beforeActiveAgentNote);
+      const wsBefore = needsWorkspaceRefresh && row.workspaceId
+        ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null)
+        : null;
 
       let verifiedExpectedRepo: string | undefined;
       let afterWorkspaceRepo: string | undefined;
       if (input.kind === "idle") {
-        const ws = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
         const savedRepo = Object.hasOwn(beforeScope.projectRepositories, row.projectId) ? beforeScope.projectRepositories[row.projectId] : undefined;
         verifiedExpectedRepo = savedRepo?.mode === "manual"
           ? savedRepo.repo
-          : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(ws?.gitRuntime?.remoteUrl) ?? undefined);
+          : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(wsBefore?.gitRuntime?.remoteUrl) ?? undefined);
         const rejection = await verifyIdleClassification(
           latest,
           { text: input.text, receipt: input.receipt },
@@ -493,6 +521,7 @@ export function attachCoordinatorTools(
             previousKind: beforePreviousSameProject?.kind,
             previousReviewKind: beforePreviousSameProject?.reviewKind,
             previousVerificationPending: beforePreviousSameProject?.verificationPending,
+            previousVerificationTarget: beforePreviousSameProject?.verificationTarget,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
             previousQuestion: beforePreviousSameProject?.content?.question,
@@ -503,7 +532,7 @@ export function attachCoordinatorTools(
             activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
             sessionTitle: row.title,
             workspaceTitle: row.workspaceTitle,
-            workspacePath: ws?.workspaceDirectory ?? undefined,
+            workspacePath: wsBefore?.workspaceDirectory ?? undefined,
             expectedRepo: verifiedExpectedRepo,
             hasActiveAgentNote: !!beforeActiveAgentNote,
             isClarificationReply: beforeIsClarificationReply,
@@ -564,7 +593,10 @@ export function attachCoordinatorTools(
           true,
         );
         const inputIssues = extractAnchoredIssues(input.text);
-        const hasLiveAnchoredIssue = liveAnchoredIssues.size > 0 || inputIssues.size > 0;
+        const hasLiveAnchoredIssue =
+          (previousSameProject?.verificationTarget?.issues.length ?? 0) > 0 ||
+          liveAnchoredIssues.size > 0 ||
+          inputIssues.size > 0;
         const liveHadVerificationWait = hasPriorVerificationWait({
           previousKind: previousSameProject?.kind,
           previousReviewKind: previousSameProject?.reviewKind,
@@ -583,7 +615,8 @@ export function attachCoordinatorTools(
             previousSameProject?.evidenceId !== beforeJudgmentEvidenceId ||
             previousSameProject?.kind !== beforeJudgmentKind ||
             previousSameProject?.reviewKind !== beforeJudgmentReviewKind ||
-            !!previousSameProject?.verificationPending !== beforeJudgmentVerificationPending
+            !!previousSameProject?.verificationPending !== beforeJudgmentVerificationPending ||
+            JSON.stringify(previousSameProject?.verificationTarget ?? null) !== JSON.stringify(beforeJudgmentVerificationTarget ?? null)
           ) {
             throw new Error("분류 검증 중 기존 판단이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
           }
@@ -625,6 +658,39 @@ export function attachCoordinatorTools(
         } else if (input.kind === "idle" && isClarificationReply) {
           nextVerificationPending = liveHadVerificationWait;
         }
+        let nextVerificationTarget: VerificationTarget | undefined;
+        if (nextVerificationPending) {
+          const existingTarget = previousSameProject?.verificationTarget;
+          if (existingTarget) {
+            nextVerificationTarget = {
+              ...(existingTarget.repo ? { repo: existingTarget.repo } : {}),
+              issues: [...existingTarget.issues],
+            };
+          } else {
+            const currentSavedRepo = Object.hasOwn(scope.projectRepositories, row.projectId) ? scope.projectRepositories[row.projectId] : undefined;
+            const currentResolvedRepo = currentSavedRepo?.mode === "manual"
+              ? currentSavedRepo.repo
+              : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(wsBefore?.gitRuntime?.remoteUrl) ?? undefined);
+            const structural = extractAnchoredIssues(`${row.title ?? ""} ${row.workspaceTitle ?? ""}`);
+            const reviewInputIssues = input.kind === "review" ? inputIssues : new Set<number>();
+            const priorVerificationTextIssues = extractAnchoredIssues(
+              `${previousSameProject?.kind === "review" ? previousSameProject.text ?? "" : ""} ${liveActiveAgentNote && latestNote?.kind === "review" ? latestNote.text ?? "" : ""}`,
+            );
+            const turnIssues = extractAnchoredIssues(latest.turns.map(t => t.text).join(" "));
+            const targetIssueSet = structural.size > 0
+              ? structural
+              : reviewInputIssues.size > 0
+                ? reviewInputIssues
+                : priorVerificationTextIssues.size > 0
+                  ? priorVerificationTextIssues
+                  : turnIssues;
+            const issues = [...targetIssueSet].sort((a, b) => a - b).slice(0, 20);
+            nextVerificationTarget = {
+              ...(currentResolvedRepo ? { repo: currentResolvedRepo } : {}),
+              issues,
+            };
+          }
+        }
         if (
           input.kind === "idle" &&
           !isClarificationReply &&
@@ -645,6 +711,7 @@ export function attachCoordinatorTools(
           ...parsedJudgment,
           ...(resolvedReviewKind ? { reviewKind: resolvedReviewKind } : {}),
           ...(nextVerificationPending ? { verificationPending: true } : {}),
+          ...(nextVerificationTarget ? { verificationTarget: nextVerificationTarget } : {}),
           projectId: row.projectId,
           ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),
         };

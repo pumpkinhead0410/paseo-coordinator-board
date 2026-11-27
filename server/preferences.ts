@@ -68,6 +68,11 @@ const storedCompletionReceipt = z.discriminatedUnion("kind", [
 export type CompletionReceipt = z.infer<typeof completionReceipt>;
 
 export const reviewKindSchema = z.enum(["general", "verification"]);
+export const verificationTargetSchema = z.object({
+  repo: repositorySlug.optional(),
+  issues: z.array(z.number().int().positive().max(2147483647)).max(20),
+});
+export type VerificationTarget = z.infer<typeof verificationTargetSchema>;
 export const judgment = z.object({
   content: decisionFields.optional(),
   receipt: completionReceipt.optional(),
@@ -79,6 +84,7 @@ const storedJudgment = z.object({
   receipt: storedCompletionReceipt.optional(),
   reviewKind: reviewKindSchema.optional(),
   verificationPending: z.boolean().optional(),
+  verificationTarget: verificationTargetSchema.optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });
 const coordinatorConfig = z.object({ provider: z.string(), thinkingOptionId: z.string().optional(), modeId: z.string().optional() });
