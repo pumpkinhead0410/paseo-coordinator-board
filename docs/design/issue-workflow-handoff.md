@@ -177,6 +177,8 @@ await classify_board_conversation({
 
 - **열린 질문의 답변 근거** 열린 질문을 답변으로 해소할 때는 최신 발췌의 `userReplies`에서 요청한 자료·결정을 실제로 제공한 발화를 확인하고 `questionAnswer: {questionEvidenceId, replyId}`로 질문과 답변을 함께 지목합니다. 질문이 여러 개면 각 답변을 배열로 제출하고 작업자 보고에는 `noteRevision`을 함께 지정합니다. 일반 질문은 해당 답변만으로 해소할 수 있습니다. 질문과 무관한 요청이나 일부 자료만 제공한 답변이면 질문을 유지합니다. 서버는 질문 이후 같은 타임라인에서 관측한 사용자 발화인지 확인하고, 답변 내용의 충족 여부는 코디네이터가 판단합니다.
 
+- **검토 경유 열린 질문의 보드 표시와 개별 해소** `review`로 옮긴 질문의 구조화 내용과 원래 근거를 보존해 대기 중인 세션의 결정 카드와 답장에 사용합니다. 같은 발췌에서는 기존 질문을 보완할 수 있습니다. 일반 질문 하나의 `withdrawn` 영수증과 별개 질문의 `questionAnswer`를 함께 제출할 수 있으며, `idle`에는 열린 질문마다 각자의 증거가 필요합니다. 일부 질문만 답변한 경우 `review`에 확인된 답변을 기록하면 나머지는 결정 카드에 남습니다.
+
 ## Acceptance criteria
 
 1. **확정 구현 최초 배정과 예외 보존(#301·#307·#308 vs #303·#305)**: `plan_board_assignment`가 `workspaces[].kind`·`branch`·`path`와 `sessions[].workspaceId`를 반환해 최종 `worktree`, 공유 `local_checkout`, 기존 담당자 세션을 구분할 수 있어야 합니다.

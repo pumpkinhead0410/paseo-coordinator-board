@@ -79,6 +79,9 @@ export const openQuestionStateSchema = z.object({
   userInputId: z.string().max(64).optional(), // Legacy records
   cursor: z.string().max(64).optional(),
   text: z.string().max(2400),
+  content: decisionFields.optional(),
+  question: z.string().trim().min(1).max(2000).optional(),
+  requestedAt: z.string().optional(),
 });
 export type OpenQuestionState = z.infer<typeof openQuestionStateSchema>;
 export const judgment = z.object({

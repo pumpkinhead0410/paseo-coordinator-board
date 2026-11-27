@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachCoordinatorTools, verifyIdleClassification } from "../../server/coordinator";
@@ -22,6 +22,10 @@ import { attachReportTool, recordReport } from "../../server/reporting";
 import { sessionClarificationCard } from "../../shared/clarifications";
 import { reportingKey, type Note, type SessionRow } from "../../shared/contract";
 import { decisionCount, displayLane } from "../../shared/decision-count";
+import contribute from "../../index.server";
+import { projectCards } from "../../client/model";
+import { boardSnapshot } from "../../shared/contract";
+import { sendDecision } from "../../shared/decision-actions";
 import { legacyRouter } from "../legacy-router";
 
 const dirs: string[] = [];
@@ -44,8 +48,10 @@ async function openIssueBoard(options: {
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "board-issue-workflow-"));
   dirs.push(dir);
-  const prefs = new PreferenceStore(join(dir, "scope.json"));
-  const notes = new NoteStore(join(dir, "notes.json"));
+  const dataDir = join(dir, "plugin-data", "coordinator-board");
+  mkdirSync(dataDir, {recursive: true});
+  const prefs = new PreferenceStore(join(dataDir, "scope.json"));
+  const notes = new NoteStore(join(dataDir, "notes.json"));
   prefs.change(scope => { scope.projects = ["easydocs"]; scope.coordinator = "coord"; });
 
   const workspaces = [
@@ -107,6 +113,7 @@ async function openIssueBoard(options: {
   let agentsListCount = 0;
   let timelineRefetchCount = 0;
   const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
+  const sent: {id: string; text: string}[] = [];
   const sdk = {
     projects: {
       list: async () => ({
@@ -130,6 +137,8 @@ async function openIssueBoard(options: {
         return page(agents.map(agent => ({ agent, project: { projectKey: "easydocs", projectName: "EasyDocs" } })));
       },
       ref: (id: string) => ({
+        refresh: async () => ({agent: agents.find(a => a.id === id)}),
+        send: async (text: string) => { sent.push({id, text}); },
         timeline: {
           refetch: async ({ limit }: {limit: number}) => {
             timelineRefetchCount += 1;
@@ -172,8 +181,146 @@ async function openIssueBoard(options: {
   const run = async (name: string, input: Record<string, unknown> = {}) =>
     (await tool(name).execute(input, { paseo: sdk, agent: { id: "coord" } })).text;
 
-  return { sdk, prefs, notes, workspaces, agents, timelines, issueStates, commitStates, tool, run };
+  function board() {
+    const handlers = new Map<string, (input: any, context: any) => Promise<unknown>>();
+    const oldHome = process.env.PASEO_HOME;
+    process.env.PASEO_HOME = dir;
+    try {
+      contribute({handle: (def, fn) => handlers.set(def.name, fn), registerSettings() {}, addHook: () => () => {}} as never);
+    } finally {
+      if (oldHome === undefined) delete process.env.PASEO_HOME;
+      else process.env.PASEO_HOME = oldHome;
+    }
+    return {
+      snapshot: async () => boardSnapshot.output.parse(await handlers.get(boardSnapshot.name)!({fresh: true}, {paseo: sdk})),
+      reply: async (input: unknown) => sendDecision.output.parse(
+        await handlers.get(sendDecision.name)!(sendDecision.input.parse(input), {paseo: sdk})),
+    };
+  }
+
+  return { sdk, prefs, notes, workspaces, agents, timelines, issueStates, commitStates, tool, run, board, sent };
 }
+
+function sessionTools(f: Awaited<ReturnType<typeof openIssueBoard>>, sessionId: string) {
+  return {
+    read: async () => JSON.parse(await f.run("read_board_conversation", {sessionId})),
+    classify: (input: Record<string, unknown>) => f.run("classify_board_conversation", {sessionId, ...input}),
+    append: (...turns: (string | {role: "user"; text: string})[]) => {
+      f.timelines.get(sessionId)!.push(...turns);
+      const agent = f.agents.find(a => a.id === sessionId)!;
+      agent.updatedAt = new Date(Date.parse(agent.updatedAt) + 1000).toISOString();
+    },
+  };
+}
+
+test("review carries the stage-two question through the board snapshot and reply RPC", async () => {
+  const f = await openIssueBoard();
+  const sessionId = "w305";
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
+  const card = async () => projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  const opened = await read();
+  const content = {question: "공식 안전문과 저작권 규칙을 알려 주세요.", needsInput: "공식 안전문 원문과 회사 저작권 규칙"};
+  await classify({evidenceId: opened.evidenceId, kind: "question", text: "#305 2단계 자료 대기", content});
+  const initial = (await card())!.session;
+  const oldVersion = initial.decision!.version;
+  const updatedContent = {...content, recommendation: "공식 원문과 회사명 표기 규칙을 첨부합니다."};
+  await classify({evidenceId: opened.evidenceId, kind: "question", text: "#305 2단계 자료 대기", content: updatedContent});
+  const currentVersion = (await card())!.session.decision!.version;
+  expect(currentVersion).not.toBe(oldVersion);
+  append("#305 1단계 통합 확인을 기다립니다.");
+  const latest = await read();
+  await classify({evidenceId: latest.evidenceId, kind: "review", text: "#305 1단계 통합 확인"});
+
+  const carried = (await card())?.session;
+  expect(carried).toMatchObject({lane: "human", evidenceId: latest.evidenceId,
+    decision: {...updatedContent, version: currentVersion, source: "coordinator"}});
+  expect(sessionClarificationCard(carried!)).toEqual({
+    kind: "session", sessionId, projectId: "easydocs", version: currentVersion,
+  });
+  const answer = {projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
+    text: "첨부 원문과 회사명 표기 규칙을 사용하세요.", requestKey: "carried-question-reply"};
+  await expect(board.reply({...answer, version: oldVersion})).rejects.toThrow(/바뀌었습니다/);
+  await expect(board.reply({...answer, version: carried!.decision!.version})).resolves.toMatchObject({recipientId: sessionId});
+  expect(f.sent).toHaveLength(1);
+  expect(f.sent[0].id).toBe(sessionId);
+  expect(JSON.parse(f.sent[0].text.split("\n")[1])).toMatchObject({
+    sourceSessionId: sessionId, recipientSessionId: sessionId, evidenceId: opened.evidenceId,
+    revision: carried!.decision!.version, questions: [{id: carried!.decision!.version, text: content.question}],
+  });
+});
+
+test("same excerpt permits supplementing needsInput while rejecting a replacement question", async () => {
+  const f = await openIssueBoard();
+  const {read, classify} = sessionTools(f, "w305");
+  const {evidenceId} = await read();
+  const question = "공식 안전문을 보내 주실 수 있나요?";
+  const input = {evidenceId, kind: "question", text: "#305 공식 안전문 대기"};
+  await classify({...input, content: {question}});
+  const needsInput = "공식 CE/UL 안전문 원문";
+  await classify({...input, content: {question, needsInput}});
+  const supplemented = f.prefs.read().judgments.w305;
+  expect(supplemented.content).toEqual({question, needsInput});
+  await classify({evidenceId, kind: "review", text: "#305 1단계 통합 확인"});
+  await expect(classify({...input, content: {question: "배포 날짜를 알려 주실 수 있나요?", needsInput}}))
+    .rejects.toThrow(/다른 질문으로 교체/);
+  await classify({...input, content: {question}});
+  expect(f.prefs.read().judgments.w305.content).toEqual({question, needsInput});
+});
+
+test("question-specific withdrawal and replies can resolve separate open questions", async () => {
+  const f = await openIssueBoard();
+  const {read, classify, append} = sessionTools(f, "w305");
+  const ask = async (question: string) => {
+    const {evidenceId} = await read();
+    await classify({evidenceId, kind: "question", text: question, content: {question}});
+    return evidenceId;
+  };
+  const h1 = await ask("H1 사진 검토 요청");
+  append("원문 보존 기간을 알려 주세요.");
+  const retention = await ask("원문 보존 기간");
+  append("표지 이미지 경로를 알려 주세요.");
+  const cover = await ask("표지 이미지 경로");
+  append({role: "user", text: "원문은 14일 보존하세요."}, "H1 사진 검토 요청이 취소됐습니다. 원문 보존 기간을 기록했습니다.");
+  const partial = await read();
+  const receipt = {kind: "withdrawn", targetEvidenceId: h1, reason: "H1 사진 검토 취소"};
+  const retentionAnswer = {questionEvidenceId: retention, replyId: partial.userReplies.at(-1).replyId};
+  const finish = (evidenceId: string, questionAnswer: unknown) =>
+    classify({evidenceId, kind: "idle", text: "남은 결정 없음", receipt, questionAnswer});
+  const before = f.prefs.read().judgments.w305;
+  await expect(finish(partial.evidenceId, retentionAnswer)).rejects.toThrow(/질문/);
+  expect(f.prefs.read().judgments.w305).toEqual(before);
+  append({role: "user", text: "표지 이미지는 cover.png를 사용하세요."},
+    "H1 사진 검토 요청이 취소됐습니다. 원문 보존 기간과 표지 이미지 경로를 기록했습니다.");
+  const done = await read();
+  const coverAnswer = {questionEvidenceId: cover, replyId: done.userReplies.at(-1).replyId};
+  await expect(classify({evidenceId: done.evidenceId, kind: "idle", text: "남은 결정 없음",
+    receipt: {...receipt, targetEvidenceId: cover}, questionAnswer: [retentionAnswer, coverAnswer]}))
+    .rejects.toThrow(/철회·취소 근거/);
+  expect(f.prefs.read().judgments.w305).toEqual(before);
+  await finish(done.evidenceId, [retentionAnswer, coverAnswer]);
+  expect(f.prefs.read().judgments.w305).toMatchObject({kind: "idle", receipt});
+  expect(f.prefs.read().judgments.w305.openQuestions).toBeUndefined();
+});
+
+test("a review with one cited answer keeps the other question and its needsInput on the board", async () => {
+  const f = await openIssueBoard();
+  const sessionId = "w305";
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const first = await read();
+  const remaining = {question: "공식 안전문을 보내 주세요.", needsInput: "공식 CE/UL 원문"};
+  await classify({evidenceId: first.evidenceId, kind: "question", text: remaining.question, content: remaining});
+  append("보존 기간을 알려 주세요.");
+  const second = await read();
+  await classify({evidenceId: second.evidenceId, kind: "question", text: "보존 기간을 알려 주세요."});
+  append({role: "user", text: "14일 보존하세요."}, "보존 기간을 기록했습니다.");
+  const latest = await read();
+  await classify({evidenceId: latest.evidenceId, kind: "review", text: "#305 1단계 통합 확인",
+    questionAnswer: {questionEvidenceId: second.evidenceId, replyId: latest.userReplies.at(-1).replyId}});
+  expect(f.prefs.read().judgments.w305.openQuestions?.map(q => q.evidenceId)).toEqual([first.evidenceId]);
+  const card = projectCards(await f.board().snapshot()).human.find(c => c.session.id === sessionId);
+  expect(card?.session.decision).toMatchObject({...remaining, evidenceId: first.evidenceId});
+});
 
 test.each(["unrelated", "rollover", "reported answer"] as const)("binds stage-two answers to their question: %s", async scenario => {
   const { run, timelines, sdk, notes, issueStates, commitStates } = await openIssueBoard();

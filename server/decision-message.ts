@@ -53,7 +53,7 @@ export function sessionReplyMessage(row:SessionRow, input:DecisionInput) {
   return message({
     projectId:row.projectId, projectTitle:row.projectTitle, source:decision.source,
     sourceSessionId:row.id, sourceSessionTitle:row.title, recipientSessionId:input.recipientId,
-    cardId:row.id, cardTitle:row.title, revision:decision.version, evidenceId:row.evidenceId,
+    cardId:row.id, cardTitle:row.title, revision:decision.version, evidenceId:decision.evidenceId ?? row.evidenceId,
     questions:[{id:decision.version, text:decision.question}], action:input.action,
   }, input.text);
 }

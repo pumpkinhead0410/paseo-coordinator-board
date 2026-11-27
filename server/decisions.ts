@@ -56,14 +56,24 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
   const noteQuestion = activeNote?.kind === "question";
   const answeredNote = noteQuestion && answer?.noteRevision === activeNote.revision;
   const dismissed = row.evidenceId && row.evidenceId === activeNote?.evidenceId && activeNote.origin === "person" && activeNote.kind !== "question";
+  const judgment = prefs.judgments[row.id];
+  const matched = judgment?.projectId === row.projectId ? judgment : undefined;
+  const structured = matched?.kind === "question" && matched.evidenceId === row.evidenceId ? matched : undefined;
+  const pending = matched?.openQuestions ?? (matched?.openQuestion ? [matched.openQuestion] : []);
+  const carried = structured ? undefined : pending.at(-1);
   let content: Omit<Decision, "version">;
+  let questionEvidenceId: string | undefined;
   if (row.nativePending) {
     content = { source: "permission", question: row.detail };
+  } else if (carried?.text && row.status === "idle" && row.evidenceId && !dismissed && !row.boardFact?.current) {
+    content = { ...carried.content, source: "coordinator", question: carried.question ?? carried.text };
+    questionEvidenceId = carried.evidenceId;
+    row.lane = "human";
+    row.detail = "코디네이터 판단 · " + content.question;
+    row.decisionRequestedAt = carried.requestedAt;
   } else if (row.status === "idle" && row.evidenceId && !dismissed && row.lane === "human") {
-    const judgment = prefs.judgments[row.id];
-    const structured = judgment?.kind === "question" && judgment.evidenceId === row.evidenceId && judgment.projectId === row.projectId;
     content = structured
-      ? { ...judgment.content, source: "coordinator", question: judgment.content?.question || judgment.text }
+      ? { ...structured.content, source: "coordinator", question: structured.content?.question || structured.text }
       : { source: "conversation", question: row.detail.replace(/^세션의 확인 요청 · /, "") };
   } else if (noteQuestion && !answeredNote && row.status === "idle" && row.evidenceId) {
     content = { source: activeNote.origin === "agent" ? "agent-note" : "person-note", question: activeNote.text };
@@ -71,13 +81,13 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
     if (answeredNote && !row.nativePending) row.decisionAnswered = true;
     return;
   }
-  const version = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : row.evidenceId, activeNote?.revision ?? 0, content]);
+  const version = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : questionEvidenceId ?? row.evidenceId, activeNote?.revision ?? 0, content]);
   if (content.source !== "permission" && answer?.version === version) {
     row.decisionAnswered = true;
     row.lane = "review";
     row.detail = "답장을 보냈습니다. 담당 세션의 결과를 기다립니다.";
   } else {
-    row.decision = { ...content, version };
+    row.decision = { ...content, version, ...(questionEvidenceId ? {evidenceId: questionEvidenceId} : {}) };
     if (content.source === "conversation" && evidence) {
       const excerpt = lastConversationQuestion(evidence, row.id === prefs.coordinator);
       if (excerpt?.question === content.question && excerpt.markdown !== content.question) {
@@ -202,7 +212,8 @@ export class DecisionSender {
           title: row.decision.question || row.title, at: new Date().toISOString(), projectId: input.projectId,
           ...(input.images?.length ? {imageCount:input.images.length} : {}),
           answer: input.text, recipientId: input.recipientId, coordinator: input.action === "coordinate" },
-        fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version, ...(note?.kind === "question" ? { noteRevision: note.revision } : {}),
+        fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version,
+        ...(note?.kind === "question" && !row.decision.evidenceId ? { noteRevision: note.revision } : {}),
       };
     });
     try {
