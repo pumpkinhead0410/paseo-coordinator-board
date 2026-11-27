@@ -29,6 +29,7 @@ const session = z.object({
   decision: decisionSchema.optional(),
   decisionAnswered: z.boolean().optional(),
   boardFact: factSchema.extend({ current: z.boolean() }).optional(),
+  hasActiveTurn: z.literal(true).optional(),
   nativePending: z.boolean().optional(),
   permissionVersion: z.string().optional(),
   decisionRequestedAt: z.string().optional(),
@@ -61,6 +62,10 @@ export const boardSnapshot = defineRpc({
   output: z.object({ sessions: z.array(session), notes: z.record(z.string(), noteSchema),
     projects: z.array(z.object({ id: z.string(), title: z.string(), path: z.string(), selected: z.boolean() })),
     coordinator: sessionId.nullable(), clarifications:z.array(clarificationEntry).optional(), replyHistory: z.array(replyEntry).optional(), trackedDecisions: trackedDecisionViewSchema.optional(), pullRequests: pullRequestViewSchema.optional() }),
+});
+export const claimBoardQuotaNotice = defineRpc({
+  name: "board.claim-quota-notice", input: z.strictObject({}),
+  output: z.object({ message: z.string().nullable() }),
 });
 export const boardDecisionCount = defineRpc({
   name: "board.decision-count", input: z.strictObject({}),

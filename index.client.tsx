@@ -1,11 +1,12 @@
+import { pollQuotaNotices } from "./client/quota-delivery";
 import { boardReadiness, type BoardReadiness } from "./shared/readiness";
 import { DecisionBadge, publishDecisionCount } from "./client/decision-badge";
 import { decisionCount } from "./shared/decision-count";
 import type { z } from "zod";
 import { useRpc, type PluginClientContext, type PluginScreenProps, type PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { SidebarRow, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { boardScope, boardSnapshot, saveNote, setReporting } from "./shared/contract";
+import { boardScope, boardSnapshot, claimBoardQuotaNotice, saveNote, setReporting } from "./shared/contract";
 import { BoardLanguageProvider, useBoardLanguage } from "./client/language";
 import { BoardView } from "./client/board";
 import { NoteEditor } from "./client/note-editor";
@@ -13,7 +14,21 @@ import { SessionPhotoMessage } from "./client/session-photos";
 import { boardPhotoMessageSchema, isBoardPhotoMessage } from "./shared/session-photos";
 import type { NoteInput, Snapshot } from "./client/model";
 
+function useQuotaNotices(hostId: string, enabled = true) {
+  const read = useRpc(claimBoardQuotaNotice);
+  const toast = useToast();
+  const current = useRef({ read, toast });
+  current.current = { read, toast };
+  useEffect(() => {
+    if (!enabled) return;
+    const { toast: hostToast } = current.current;
+    return pollQuotaNotices(async () => (await current.current.read({})).message,
+      message => hostToast.show(message, { variant: "warning", durationMs: 18000 }));
+  }, [hostId, enabled]);
+}
+
 function HostBoard({ host, theme, layout, navigation }: PluginScreenProps) {
+  useQuotaNotices(host.id);
   const getBoard = useRpc(boardSnapshot);
   const readyRpc = useRpc(boardReadiness);
   const readyRef = useRef(readyRpc);
@@ -105,6 +120,7 @@ const englishBoardTitle = "Session Coordinator Board";
 
 function LocalSidebarItem({ host, theme, currentScreen, openScreen }: PluginSidebarItemProps) {
   const { language, t } = useBoardLanguage();
+  useQuotaNotices(host.id, currentScreen?.screenId !== "board");
   return <SidebarRow icon="LayoutDashboard" label={t(boardTitle, englishBoardTitle)} active={currentScreen?.screenId === "board"}
     trailing={<DecisionBadge key={host.id} host={host.id} theme={theme} />}
     onPress={() => openScreen({ screenId: "board", params: { language } })} />;

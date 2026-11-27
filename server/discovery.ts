@@ -80,6 +80,7 @@ export async function discoverSessions(paseo: Pick<Sdk, "agents" | "workspaces">
       provider: agent.provider?.trim() || null,
       model: agent.model?.trim() || null,
       ...(agent.metadata?.[reportingKey] === true ? { reporting: true } : {}),
+      ...(agent.activeTurn ? { hasActiveTurn: true as const } : {}),
       status: agent.status, activityAt: agent.updatedAt,
       ...observedState(agent),
       ...(agent.attentionReason === "permission" && agent.attentionTimestamp ? {decisionRequestedAt:agent.attentionTimestamp} : {}),

@@ -1,3 +1,4 @@
+import { quotaEvidence } from "./quota-notice";
 import { createHash } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { SessionRow } from "../shared/contract";
@@ -8,6 +9,7 @@ type Page = Awaited<ReturnType<ReturnType<Sdk["agents"]["ref"]>["timeline"]["ref
 export type Turn = { role: "user" | "assistant"; text: string; truncated?: boolean; at?: string };
 type ClarificationObservation = { bodyHash: string; response?: string };
 export type Evidence = {
+  quota?: ReturnType<typeof quotaEvidence>;
   id: string; turns: Turn[];
   replies?: Map<string, string>;
   lastInputIds?: string[];
@@ -66,7 +68,8 @@ export function excerpt(page: Page): Evidence {
     digest.update(JSON.stringify([seqEnd, role, text]));
   }
   if (laterInputs.length) digest.update(JSON.stringify(laterInputs));
-  return { id: digest.digest("hex").slice(0, 24), turns: turns.slice(-4),
+  const quota = quotaEvidence(page);
+  return { ...(quota ? {quota} : {}), id: digest.digest("hex").slice(0, 24), turns: turns.slice(-4),
     ...(clarification && messageIds.length ? { lastInputIds: messageIds } : {}),
     ...(clarificationMessages.size ? { clarificationMessages } : {}),
     ...(boardMessageHashes.size ? {boardMessageHashes} : {}),

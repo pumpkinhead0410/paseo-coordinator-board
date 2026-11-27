@@ -1,3 +1,4 @@
+import { claimQuotaNotice } from "./server/quota-notice";
 import type { ReplyEntry } from "./shared/reply-history";
 import { trackedRecipient, usesSourceCoordinator } from "./shared/tracked-decisions";
 import { boardReadiness } from "./shared/readiness";
@@ -10,7 +11,7 @@ import { decisionCount } from "./shared/decision-count";
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { boardDecisionCount, boardScope, boardSnapshot, reportingKey, saveNote, setReporting } from "./shared/contract";
+import { boardDecisionCount, claimBoardQuotaNotice, boardScope, boardSnapshot, reportingKey, saveNote, setReporting } from "./shared/contract";
 import { canReceiveBoardInput, discoverSessions } from "./server/discovery";
 import { attachReportTool } from "./server/reporting";
 import { ConversationReader, excerpt } from "./server/conversation";
@@ -36,6 +37,9 @@ export default function contribute(server: PluginServerContext) {
 
   const prefs = new PreferenceStore(join(dataDir, "scope.json"));
   const reader = new ConversationReader();
+  server.handle(claimBoardQuotaNotice, async (_input, { paseo }) => ({
+    message: await claimQuotaNotice(paseo, prefs, notes, reader),
+  }));
   const facts = new BoardFacts(prefs, notes, reader);
   facts.register(server);
   const operations = createOperations(prefs, join(home, "plugin-workspaces", "coordinator-board"), facts);
