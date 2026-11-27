@@ -242,7 +242,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 정리",
-    receipt: { kind: "withdrawn", reason: "임의 취소" },
+    receipt: { kind: "withdrawn", targetEvidenceId: initialExcerpt.evidenceId, reason: "임의 취소" },
   })).rejects.toThrow(/withdrawn으로 해제할 수 없습니다/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
@@ -322,10 +322,22 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration commit cf6f661 + comparison commit e9fe346 + cleanup hold + unrelated doc task waiting!
+  // 3. Worker finishes /done with integration commit cf6f661 + repro log SHA e9fe346 in same sentence + cleanup hold + unrelated doc task waiting!
+  w308.updatedAt = "2026-11-26T06:36:00Z";
+  timelines.get("w308")!.push("최종검증 대기입니다. 재현 로그는 e9fe346을 기준으로 확보했습니다.");
+  const reproLogOnlyExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  commitStates.set("acme/easydocs@e9fe346", { onMain: true, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: reproLogOnlyExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, commit: "e9fe346", verifiedCommit: "e9fe346" },
+  })).rejects.toThrow(/통합 근거와 연결되지 않아/);
+
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. 실제 통합 커밋은 cf6f661입니다. 비교 대상인 예전 커밋은 e9fe346입니다. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. 실제 통합 커밋은 cf6f661이고 재현 로그는 e9fe346에서 확보했습니다. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -479,7 +491,7 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     evidenceId: e305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", reason: "임의 철회" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/열린 질문과 같은 발췌|철회·취소 근거/);
 
   const w305 = agents.find(a => a.id === "w305")!;
@@ -491,7 +503,7 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     evidenceId: stillAsking305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", reason: "임의 철회" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
   // Checking whether the user withdrew ("철회 여부를 확인 중입니다") is also rejected fail-closed!
@@ -503,7 +515,7 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     evidenceId: checkingWithdraw305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", reason: "임의 철회" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
   // Separate-task withdrawal while the original decision is still needed is also rejected fail-closed!
@@ -515,30 +527,38 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     evidenceId: separateWithdraw305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", reason: "임의 철회" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
-  // Withdrawing a DIFFERENT request within the same issue, even if another sentence mentions the open question's topic, is rejected!
+  // Withdrawing a DIFFERENT request within the same issue (even sharing one word like "공식" or mentioning the topic in another sentence) is rejected!
   w305.updatedAt = "2026-11-26T06:39:00Z";
-  timelines.get("w305")!.push("#305의 배포 일정 변경 요청이 취소됐습니다. 2단계 자료에 관한 문서를 첨부합니다.");
+  timelines.get("w305")!.push("#305의 공식 배포 일정 변경 요청이 취소됐습니다. 2단계 자료에 관한 문서를 첨부합니다.");
   const otherRequestWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
   await expect(run("classify_board_conversation", {
     sessionId: "w305",
     evidenceId: otherRequestWithdraw305.evidenceId,
     kind: "idle",
     text: "#305 철회",
-    receipt: { kind: "withdrawn", reason: "배포 일정 변경 취소" },
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "배포 일정 변경 취소" },
   })).rejects.toThrow(/철회·취소 근거/);
 
-  // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
+  // When the user withdraws the #305 stage-2 request, idle classification requires targetEvidenceId matching the open question (and no integration commit)!
   w305.updatedAt = "2026-11-26T06:40:00Z";
   timelines.get("w305")!.push("사용자 요청 철회를 확인했습니다. 2단계 자료 대기 없이 대기합니다.");
   const withdrawn305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: withdrawn305.evidenceId,
+    kind: "idle",
+    text: "#305 사용자 요청 철회 확인, 남은 결정 없음.",
+    receipt: { kind: "withdrawn", targetEvidenceId: "wrong-evidence-id", reason: "사용자 요청 철회" },
+  })).rejects.toThrow(/targetEvidenceId/);
   await run("classify_board_conversation", {
     sessionId: "w305",
     evidenceId: withdrawn305.evidenceId,
     kind: "idle",
     text: "#305 사용자 요청 철회 확인, 남은 결정 없음.",
+    receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "사용자 요청 철회" },
   });
   expect(prefs.read().judgments.w305).toMatchObject({ kind: "idle", evidenceId: withdrawn305.evidenceId });
 });

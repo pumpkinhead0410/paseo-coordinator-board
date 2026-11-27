@@ -9,6 +9,7 @@ export type IssueOutcome = {
   state: IssueState;
   stateReason: IssueCloseReason;
   url?: string;
+  closingCommits?: string[];
 };
 export type CommitCheckStatus = "passed" | "failed" | "pending" | "unavailable";
 export type CommitVerification = {

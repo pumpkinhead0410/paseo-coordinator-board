@@ -46,22 +46,34 @@ function extractTopicTokens(text: string): Set<string> {
   return tokens;
 }
 
-const comparisonOrPriorCommitPattern = /(?:비교\s*대상|예전\s*커밋|이전\s*커밋|기존\s*커밋|전\s*커밋|구\s*커밋|참고\s*커밋|직전\s*커밋|\b(?:previous|older|prior|baseline)\s+commit\b|\bcompared\s+(?:to|with)\b|\binstead\s+of\b)/i;
+const comparisonOrPriorCommitPattern = /(?:비교\s*대상|예전\s*커밋|이전\s*커밋|기존\s*커밋|전\s*커밋|구\s*커밋|참고\s*커밋|직전\s*커밋|재현\s*로그|로그(?:는|를|가|에서)|기준으로\s*확보|\b(?:previous|older|prior|baseline)\s+commit\b|\brepro(?:duction)?\s+log\b|\bcompared\s+(?:to|with)\b|\binstead\s+of\b)/i;
 const integrationCommitContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:실제\s*)?(?:통합|반영|병합|머지)\s*커밋|(?:통합|반영|병합|머지|적용)(?:됐|됨|했|되었|완료|을\s*마쳤|과\s*검증)|\b(?:merged|integrated|landed|pushed\s+to\s+(?:origin\/)?(?:main|master))\b/i;
+const pendingExcerptPattern = /(?:최종\s*검증|통합|병합|머지)\s*(?:대기|예정|미실행|미완료|남았|남아)|\b(?:verification|integration)\s+(?:pending|remaining)\b/i;
 const waitClearedPattern = /(?:대기\s*없이|필요\s*없|철회|취소|중단|해제|종료|\b(?:no\s+longer\s+(?:needed|waiting)|withdrawn|cancelled|canceled)\b)/i;
 
 function commitCitedInText(text: string, commit: string, resolvedSha?: string): boolean {
-  const allTokens = new Set((text.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).map(t => t.toLowerCase()));
+  if (pendingExcerptPattern.test(text)) return false;
   const clauses = text
-    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|\s+대신\s+)/)
+    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|,\s+|(?<!#\d+)\s*·\s*(?!#\d+\b)|\s+대신\s+|(?<=(?:이고|이며|하고|했고|지만|으나|인데|하며|했으며))\s+)/)
     .map(s => s.trim())
     .filter(Boolean);
   return clauses.some(clause => {
     const tokens = clause.match(/\b[0-9a-f]{7,40}\b/gi) ?? [];
     if (!tokens.some(token => sameCommitRef(token, commit, resolvedSha))) return false;
     if (comparisonOrPriorCommitPattern.test(clause)) return false;
-    return integrationCommitContextPattern.test(clause) || allTokens.size === 1;
+    return integrationCommitContextPattern.test(clause);
   });
+}
+
+function matchesQuestionTopic(sentenceTokens: Set<string>, questionTokens: Set<string>): boolean {
+  if (questionTokens.size === 0) return true;
+  if (sentenceTokens.size === 0) return false;
+  let overlap = 0;
+  for (const token of sentenceTokens) {
+    if (questionTokens.has(token)) overlap += 1;
+  }
+  const required = Math.min(2, questionTokens.size);
+  return overlap >= required && overlap * 2 >= sentenceTokens.size;
 }
 
 function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>, openQuestionText: string): boolean {
@@ -85,10 +97,7 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
   const questionTokens = extractTopicTokens(openQuestionText);
   if (questionTokens.size === 0) return true;
 
-  const directMatch = withdrawalSentences.some(sentence => {
-    const sTokens = extractTopicTokens(sentence);
-    return [...questionTokens].some(token => sTokens.has(token));
-  });
+  const directMatch = withdrawalSentences.some(sentence => matchesQuestionTopic(extractTopicTokens(sentence), questionTokens));
   if (directMatch) return true;
 
   const hasPureConfirmation = withdrawalSentences.some(sentence => extractTopicTokens(sentence).size === 0);
@@ -101,8 +110,7 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     ) {
       return false;
     }
-    const sTokens = extractTopicTokens(sentence);
-    return [...questionTokens].some(token => sTokens.has(token));
+    return matchesQuestionTopic(extractTopicTokens(sentence), questionTokens);
   });
 }
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
@@ -146,6 +154,7 @@ export async function verifyIdleClassification(
     previousNeedsInput?: string;
     activeNoteKind?: "question" | "review" | "done" | "clear";
     activeNoteEvidenceId?: string;
+    activeNoteRevision?: number;
     activeNoteText?: string;
     sessionTitle?: string;
     workspaceTitle?: string;
@@ -194,6 +203,15 @@ export async function verifyIdleClassification(
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
     }
+    if (!input.receipt || input.receipt.kind !== "withdrawn") {
+      return "열린 질문을 철회로 해제하려면 닫으려는 질문의 targetEvidenceId(활성 보고가 있으면 targetNoteRevision 포함)를 담은 withdrawn 영수증(receipt)을 제출하세요.";
+    }
+    if (priorQuestionEvidenceId && input.receipt.targetEvidenceId !== priorQuestionEvidenceId) {
+      return `철회 영수증의 targetEvidenceId(${input.receipt.targetEvidenceId})가 열린 질문의 근거(${priorQuestionEvidenceId})와 일치하지 않아 idle로 해제할 수 없습니다.`;
+    }
+    if (context.hasActiveAgentNote && context.activeNoteKind === "question" && input.receipt.targetNoteRevision !== context.activeNoteRevision) {
+      return `철회 영수증의 targetNoteRevision(${input.receipt.targetNoteRevision ?? "없음"})이 열린 보고 판본(${context.activeNoteRevision})과 일치하지 않아 idle로 해제할 수 없습니다.`;
+    }
     if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, openQuestionText)) {
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
     }
@@ -214,6 +232,12 @@ export async function verifyIdleClassification(
   if (receipt.kind === "withdrawn") {
     if (hasIntegrationReviewWait || claimsCompletion) {
       return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
+    }
+    if (context.hasActiveAgentNote && context.activeNoteEvidenceId && receipt.targetEvidenceId !== context.activeNoteEvidenceId) {
+      return `철회 영수증의 targetEvidenceId(${receipt.targetEvidenceId})가 열린 보고의 근거(${context.activeNoteEvidenceId})와 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
+    }
+    if (context.hasActiveAgentNote && receipt.targetNoteRevision !== context.activeNoteRevision) {
+      return `철회 영수증의 targetNoteRevision(${receipt.targetNoteRevision ?? "없음"})이 열린 보고 판본(${context.activeNoteRevision})과 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
     }
     if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, openQuestionText)) {
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
@@ -253,6 +277,9 @@ export async function verifyIdleClassification(
   const commitOutcome = await verifier.verifyMainCommit(context.workspacePath, receipt.repo, receipt.commit);
   if (!commitOutcome.onMain) {
     return `통합 커밋(${receipt.commit})이 대상 저장소(${receipt.repo})의 main 브랜치에 반영된 것을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0 && !issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))) {
+    return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 종료 커밋과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
   }
   if (!commitCitedInText(last.text, receipt.commit, commitOutcome.resolvedSha)) {
     return `영수증의 통합 커밋(${receipt.commit})이 최신 완료 발췌의 통합 근거와 연결되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
@@ -323,7 +350,7 @@ export function attachCoordinatorTools(
             ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}), workspaceTitle: r.workspaceTitle, title: r.title,
             status: r.status, activityAt: r.activityAt,
             ...(matchedJudgment ? { judgment: { kind: matchedJudgment.kind, evidenceId: matchedJudgment.evidenceId } } : {}),
-            ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? { note: { kind: activeNote.kind, origin: activeNote.origin ?? "person", ...(activeNote.evidenceId ? { evidenceId: activeNote.evidenceId } : {}) } } : {}),
+            ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? { note: { kind: activeNote.kind, origin: activeNote.origin ?? "person", revision: activeNote.revision, ...(activeNote.evidenceId ? { evidenceId: activeNote.evidenceId } : {}) } } : {}),
             ...(needsRecommendation ? { needsRecommendation: true } : {}),
             ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? { factCandidate: true } : {}),
           });
@@ -343,7 +370,7 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci'|'local', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', reason} only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci'|'local', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
@@ -392,6 +419,7 @@ export function attachCoordinatorTools(
             previousNeedsInput: beforePreviousSameProject?.content?.needsInput,
             activeNoteKind: beforeActiveAgentNote ? currentNote?.kind : undefined,
             activeNoteEvidenceId: beforeActiveAgentNote ? currentNote?.evidenceId : undefined,
+            activeNoteRevision: beforeActiveAgentNote ? currentNote?.revision : undefined,
             activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
             sessionTitle: row.title,
             workspaceTitle: row.workspaceTitle,

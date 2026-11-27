@@ -121,7 +121,10 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 14차 `14272eb7` 반영 및 Paseo SDK 경계 기록)**:
   1. `commitCitedInText`가 비교·이전 커밋 문맥(“비교 대상인 예전 커밋은 `e9fe346`입니다”)을 제외하고 통합·반영 문맥에 속한 SHA만 인정하도록 강화했습니다(`server/coordinator.ts`).
   2. `hasConfirmedWithdrawalForTarget`가 철회 문장 자체의 주제 토큰 일치(또는 순수 철회 확인 문장 + `대기 없이`/`필요 없` 등 대기 해제 문장의 주제 일치)만 허용하도록 좁혀, 다른 문장의 주제 단어(“H1 사진 검토에 관한 문서를 첨부합니다”)가 타 요청 철회에 빌려 쓰이지 않도록 차단했습니다(`server/coordinator.ts`).
-  3. **Paseo SDK 2-RPC 경계(플러그인 한계)**: `@getpaseo/plugin/server`에서 `agents.list()`와 `agents.ref(id).timeline.refetch()`는 공통 스냅샷 버전을 공유하지 않는 별도 비동기 RPC입니다. 실제 Paseo 데몬에서는 새 발화가 `agent.updatedAt`(`activityAt`)과 `status`를 함께 갱신하므로 `assertStableRow → reader.read → assertStableRow` 브래킷으로 탐지되나, 마지막 `agents.list()` 호출 도중 `activityAt`을 전혀 바꾸지 않고 타임라인만 변이하는 상황은 상위 Paseo SDK에 단일 스냅샷/CAS 원시 연산이 없는 한 플러그인 레이어에서 원천 차단할 수 없는 구조적 경계로 기록합니다.
+  3. **Paseo SDK 2-RPC 경계(플러그인 한계)**: `@getpaseo/plugin/server`에서 `agents.list()`와 `agents.ref(id).timeline.refetch()`는 공통 스냅샷 버전을 공유하지 않는 별도 비동기 RPC이며, 두 조회와 보드 저장을 원자적으로 묶는 계약이 없습니다. `assertStableRow → reader.read → assertStableRow` 브래킷은 각 호출에서 관측되는 `status`·`activityAt`·`evidenceId` 변화를 탐지하지만, 마지막 `agents.list()` 호출 도중 `activityAt`이 변하지 않은 채 타임라인만 변이하는 경합은 상위 Paseo SDK의 구조적 한계로 기록합니다(실호스트 데몬의 모든 발화에서 `updatedAt`과 `status`가 항상 동시 갱신되는지는 실호스트에서 미확인).
+- **2026-11-27 (독립 의도 리뷰 15차 `4bcfaeb` 지적 2건 반영)**:
+  1. `commitCitedInText`에서 유일 SHA 예외(`allTokens.size === 1`)를 제거하고 접속 어미(`이고`, `이며` 등) 단위 분리·`재현 로그`/`최종검증 대기` 차단 및 `IssueOutcome.closingCommits` 대조를 추가해, 재현 로그나 같은 문장 내 타 SHA(`e9fe346`)가 통합 커밋으로 수락되지 않게 했습니다(`server/coordinator.ts`, `server/outcome-verifier.ts`).
+  2. `withdrawn` 영수증에 `targetEvidenceId`와 `targetNoteRevision`(열린 `agent-note` 보고 대상)을 추가하고 `read_board_conversation({})`의 `note`에 `revision`을 노출하며, `matchesQuestionTopic`이 단일 공통 단어 일치가 아니라 핵심 주제 다수 일치(최소 2개 또는 질문 토큰 전부 + 철회 문장 토큰의 50% 이상)를 요구하도록 강화했습니다(`server/preferences.ts`, `server/coordinator.ts`).
 
 ## Acceptance criteria
 

@@ -36,6 +36,8 @@ export const completionReceipt = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("withdrawn"),
+    targetEvidenceId: z.string().min(1).max(64),
+    targetNoteRevision: z.number().int().nonnegative().optional(),
     reason: z.string().trim().min(1).max(300),
   }),
 ]);
