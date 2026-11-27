@@ -14,6 +14,7 @@ export type CommitCheckStatus = "passed" | "failed" | "pending" | "unavailable";
 export type CommitVerification = {
   onMain: boolean;
   resolvedSha?: string;
+  issues?: number[];
   checks: CommitCheckStatus;
 };
 export type OutcomeVerifier = {
@@ -117,23 +118,55 @@ export function summarizeCommitChecks(
   return hasSuccess ? "passed" : "unavailable";
 }
 
+const rawCommitMeta = z.object({
+  sha: z.string().regex(/^[0-9a-f]{40}$/i),
+  commit: z.object({ message: z.string().optional() }).optional(),
+});
+
+function extractCommitIssues(message?: string): number[] | undefined {
+  if (!message) return undefined;
+  const cleaned = message
+    .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi, " ")
+    .replace(/(?:\bPR\b|pull\s*request)\s*#\d+\b/gi, " ");
+  const ids = new Set<number>();
+  for (const match of cleaned.matchAll(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/(\d+)\b/gi)) {
+    const n = Number(match[1]);
+    if (Number.isSafeInteger(n) && n > 0) ids.add(n);
+  }
+  const withoutUrls = cleaned.replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+\b/gi, " ");
+  for (const match of withoutUrls.matchAll(/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)\b/g)) {
+    const n = Number(match[1]);
+    if (Number.isSafeInteger(n) && n > 0) ids.add(n);
+  }
+  return ids.size > 0 ? [...ids] : undefined;
+}
+
 async function resolveRemoteMainAncestry(
   repo: string,
   commit: string,
   runner: (command: "git" | "gh", args: string[]) => Promise<string>,
-): Promise<{ onMain: boolean; resolvedSha?: string }> {
+): Promise<{ onMain: boolean; resolvedSha?: string; issues?: number[] }> {
   try {
-    const sha = (await runner("gh", ["api", `repos/${repo}/commits/${commit}`, "--jq", ".sha"])).trim().toLowerCase();
+    const raw = (await runner("gh", ["api", `repos/${repo}/commits/${commit}`, "--jq", "{sha:.sha,commit:{message:.commit.message}}"])).trim();
+    let sha = "";
+    let issues: number[] | undefined;
+    if (/^[0-9a-f]{40}$/i.test(raw)) {
+      sha = raw.toLowerCase();
+    } else {
+      const parsed = rawCommitMeta.parse(JSON.parse(raw));
+      sha = parsed.sha.toLowerCase();
+      issues = extractCommitIssues(parsed.commit?.message);
+    }
     if (!/^[0-9a-f]{40}$/.test(sha)) return { onMain: false };
     for (const base of ["main", "master"]) {
       try {
         const status = (await runner("gh", ["api", `repos/${repo}/compare/${base}...${sha}`, "--jq", ".status"])).trim().toLowerCase();
-        if (status === "identical" || status === "behind") return { onMain: true, resolvedSha: sha };
+        if (status === "identical" || status === "behind") return { onMain: true, resolvedSha: sha, ...(issues ? { issues } : {}) };
       } catch {
         continue;
       }
     }
-    return { onMain: false, resolvedSha: sha };
+    return { onMain: false, resolvedSha: sha, ...(issues ? { issues } : {}) };
   } catch {
     return { onMain: false };
   }
@@ -261,7 +294,7 @@ export function createOutcomeVerifier(
         return { onMain: false, resolvedSha: resolved.resolvedSha, checks: "unavailable" };
       }
       const checks = await lookupCommitChecks(parsedRepo.data, resolved.resolvedSha, runner);
-      return { onMain: true, resolvedSha: resolved.resolvedSha, checks };
+      return { onMain: true, resolvedSha: resolved.resolvedSha, ...(resolved.issues ? { issues: resolved.issues } : {}), checks };
     },
   };
 }

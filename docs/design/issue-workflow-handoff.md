@@ -114,6 +114,10 @@ await classify_board_conversation({
   1. `server/outcome-verifier.ts`에서 `fetchAllCheckRuns`·`fetchAllCommitStatuses`가 각각 오류를 격리해 수집된 관측 결과를 보존하도록 변경해, `check-runs`에서 확인된 `FAILURE`가 `status` 조회 오류 때문에 `unavailable`로 가려지지 않고 `failed`를 우선 반환하도록 수정했습니다.
   2. `server/coordinator.ts`에 `hasConfirmedWithdrawalForTarget`·`separateTaskWithdrawalPattern`·`remainingNeedPattern`을 추가해 “별도 문서 작업 요청의 철회를 확인했습니다. H1 판단은 여전히 필요합니다”처럼 별도 작업 철회나 남은 판단 필요가 포함된 발췌가 열린 질문을 해소하지 못하도록 차단했습니다.
   3. `server/coordinator.ts`에서 최종 `rowsAfter`의 `activityAt` 일치를 검증하고 그 직후 `latestAfter`를 다시 대조해, 마지막 상태 조회 도중 새 발화가 추가되면 `idle` 저장을 거절하도록 강화했습니다.
+- **2026-11-27 (독립 의도 리뷰 13차 `14272eb7` 지적 3건 반영)**:
+  1. `server/coordinator.ts`·`server/outcome-verifier.ts`에서 영수증의 통합 커밋 SHA가 최신 완료 발췌에 실제로 연결되어 있는지(`commitCitedInText`)와 원격 커밋 메시지의 이슈 번호 일치(`commitOutcome.issues`)를 검증해, 다른 커밋(`e9fe346`)을 `commit`/`verifiedCommit`으로 대체하는 우회를 차단했습니다.
+  2. `hasConfirmedWithdrawalForTarget`가 열린 질문의 핵심 주제 토큰(`extractTopicTokens`)과 철회 발췌의 주제 일치를 요구하도록 강화해, 같은 이슈 안의 다른 요청(“#308의 배포 일정 변경 요청이 취소됐습니다”) 철회로 열린 H1 질문이 해소되지 않게 했습니다.
+  3. 최종 검증 구간을 `assertStableRow`(전) → `reader.read` → `assertStableRow`(후)로 감싸 마지막 `timeline.refetch()` 도중 세션이 `running`으로 전환되고 갱신 시각(`activityAt`)이 바뀌는 TOCTOU까지 차단했습니다.
 
 ## Acceptance criteria
 

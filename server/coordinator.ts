@@ -17,14 +17,43 @@ const separateTaskWithdrawalPattern = /(?:별도(?:의)?|별개(?:의)?|다른\s
 const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요|남아|남았|대기)|(?:판단|결정|확인|승인|자료|응답)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요|남아\s*있|남았|대기\s*중)|\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining))\b/i;
 const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
 
-function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>): boolean {
+const genericTopicStopwords = new Set([
+  "이슈", "사람", "확인", "요청", "질문", "대기", "진행", "위해", "제공", "알려", "주세요",
+  "부탁드립니다", "관련", "참고", "사용자", "철회", "취소", "남은", "결정", "없음", "필요",
+  "판단", "합니다", "했습니다", "있나요", "통합", "완료", "종료", "기다립니다", "있습니다",
+  "입니다", "것을", "위한", "대한", "에서", "으로", "까지", "부터", "하며", "하고", "했고",
+  "issue", "user", "request", "question", "waiting", "please", "confirm", "check", "withdrawn", "cancelled", "canceled",
+]);
+
+function extractTopicTokens(text: string): Set<string> {
+  const cleaned = text
+    .replace(referenceIssuePattern, " ")
+    .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+\b/gi, " ")
+    .replace(/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/g, " ");
+  const tokens = new Set<string>();
+  for (const raw of cleaned.match(/[0-9A-Za-z가-힣]+(?:-[0-9A-Za-z가-힣]+)*/g) ?? []) {
+    const normalized = raw
+      .toLowerCase()
+      .replace(/(?:에서는|에서도|으로는|으로도|에서|에게|까지|부터|으로|은|는|이|가|을|를|의|에|로|와|과|도|만)$/, "");
+    if (normalized.length < 2 || /^\d+$/.test(normalized) || genericTopicStopwords.has(normalized)) continue;
+    tokens.add(normalized);
+  }
+  return tokens;
+}
+
+function commitCitedInText(text: string, commit: string, resolvedSha?: string): boolean {
+  const candidates = text.match(/\b[0-9a-f]{7,40}\b/gi) ?? [];
+  return candidates.some(token => sameCommitRef(token, commit, resolvedSha));
+}
+
+function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>, openQuestionText: string): boolean {
   const trimmed = lastText.trim();
   if (!trimmed || stillAskingPattern.test(trimmed) || remainingNeedPattern.test(trimmed)) return false;
   const sentences = trimmed
     .split(/(?:\r?\n|(?<=[.!?。])\s+)/)
     .map(s => s.trim())
     .filter(Boolean);
-  return sentences.some(sentence => {
+  const hasMatchingSentence = sentences.some(sentence => {
     if (!withdrawalEvidencePattern.test(sentence)) return false;
     if (tentativeOrNegatedWithdrawalPattern.test(sentence)) return false;
     if (separateTaskWithdrawalPattern.test(sentence)) return false;
@@ -34,6 +63,14 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     }
     return true;
   });
+  if (!hasMatchingSentence) return false;
+  const questionTokens = extractTopicTokens(openQuestionText);
+  if (questionTokens.size > 0) {
+    const lastTokens = extractTopicTokens(trimmed);
+    const hasTopicOverlap = [...questionTokens].some(token => lastTokens.has(token));
+    if (!hasTopicOverlap) return false;
+  }
+  return true;
 }
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
@@ -72,6 +109,8 @@ export async function verifyIdleClassification(
     previousKind?: "question" | "review" | "idle";
     previousEvidenceId?: string;
     previousText?: string;
+    previousQuestion?: string;
+    previousNeedsInput?: string;
     activeNoteKind?: "question" | "review" | "done" | "clear";
     activeNoteEvidenceId?: string;
     activeNoteText?: string;
@@ -103,6 +142,13 @@ export async function verifyIdleClassification(
       ? proseAnchorIssues
       : priorTurnIssues;
 
+  const openQuestionText = [
+    context.activeNoteKind === "question" ? context.activeNoteText ?? "" : "",
+    context.previousKind === "question" ? context.previousText ?? "" : "",
+    context.previousKind === "question" ? context.previousQuestion ?? "" : "",
+    context.previousKind === "question" ? context.previousNeedsInput ?? "" : "",
+  ].join(" ");
+
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasIntegrationReviewWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
       return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
@@ -115,7 +161,7 @@ export async function verifyIdleClassification(
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
     }
-    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues)) {
+    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, openQuestionText)) {
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
     }
     return null;
@@ -136,7 +182,7 @@ export async function verifyIdleClassification(
     if (hasIntegrationReviewWait || claimsCompletion) {
       return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
-    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues)) {
+    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, openQuestionText)) {
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
     }
     return null;
@@ -174,6 +220,12 @@ export async function verifyIdleClassification(
   const commitOutcome = await verifier.verifyMainCommit(context.workspacePath, receipt.repo, receipt.commit);
   if (!commitOutcome.onMain) {
     return `통합 커밋(${receipt.commit})이 대상 저장소(${receipt.repo})의 main 브랜치에 반영된 것을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (!commitCitedInText(last.text, receipt.commit, commitOutcome.resolvedSha)) {
+    return `영수증의 통합 커밋(${receipt.commit})이 최신 완료 발췌의 통합 근거와 연결되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (commitOutcome.issues && commitOutcome.issues.length > 0 && !commitOutcome.issues.includes(receipt.issue)) {
+    return `통합 커밋(${receipt.commit})의 대상 이슈(${commitOutcome.issues.map(n => `#${n}`).join(", ")})가 영수증 이슈(#${receipt.issue})와 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
   }
   if (!sameCommitRef(receipt.commit, receipt.verifiedCommit, commitOutcome.resolvedSha)) {
     return `검증 커밋(${receipt.verifiedCommit})이 통합 커밋(${receipt.commit})과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
@@ -303,6 +355,8 @@ export function attachCoordinatorTools(
             previousKind: beforePreviousSameProject?.kind,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
+            previousQuestion: beforePreviousSameProject?.content?.question,
+            previousNeedsInput: beforePreviousSameProject?.content?.needsInput,
             activeNoteKind: beforeActiveAgentNote ? currentNote?.kind : undefined,
             activeNoteEvidenceId: beforeActiveAgentNote ? currentNote?.evidenceId : undefined,
             activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
@@ -317,26 +371,31 @@ export function attachCoordinatorTools(
         );
         if (rejection) throw new Error(rejection);
         const wsAfter = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
-        const rowsAfter = await managedRowsForCoordinator(paseo, prefs, agent.id);
-        const rowAfter = rowsAfter.find(r => r.id === input.sessionId);
-        if (!rowAfter) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
-        if (rowAfter.projectId !== row.projectId || rowAfter.workspaceId !== row.workspaceId) {
-          throw new Error("분류 검증 중 세션의 프로젝트 또는 워크스페이스가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
-        }
-        if (rowAfter.activityAt !== row.activityAt) {
-          throw new Error("분류 검증 중 세션 갱신 시점이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
-        }
-        if (rowAfter.nativePending) throw new Error("권한 응답 대기 중인 세션은 분류할 수 없습니다. 권한 요청을 먼저 확인해 주세요.");
-        if (rowAfter.status === "running" || rowAfter.lane === "running") {
-          throw new Error("실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요.");
-        }
-        if (rowAfter.status !== "idle") throw new Error(`대기 중인 관리 세션을 확인해 주세요(현재 상태: ${rowAfter.status ?? "unknown"}).`);
-        const latestAfter = await reader.read(paseo, rowAfter, true);
+        const assertStableRow = async () => {
+          const rowsNow = await managedRowsForCoordinator(paseo, prefs, agent.id);
+          const rowNow = rowsNow.find(r => r.id === input.sessionId);
+          if (!rowNow) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
+          if (rowNow.projectId !== row.projectId || rowNow.workspaceId !== row.workspaceId) {
+            throw new Error("분류 검증 중 세션의 프로젝트 또는 워크스페이스가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+          }
+          if (rowNow.activityAt !== row.activityAt) {
+            throw new Error("분류 검증 중 세션 갱신 시점이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+          }
+          if (rowNow.nativePending) throw new Error("권한 응답 대기 중인 세션은 분류할 수 없습니다. 권한 요청을 먼저 확인해 주세요.");
+          if (rowNow.status === "running" || rowNow.lane === "running") {
+            throw new Error("실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요.");
+          }
+          if (rowNow.status !== "idle") throw new Error(`대기 중인 관리 세션을 확인해 주세요(현재 상태: ${rowNow.status ?? "unknown"}).`);
+          return rowNow;
+        };
+        const rowMid = await assertStableRow();
+        const latestAfter = await reader.read(paseo, rowMid, true);
         if (!latestAfter?.turns.length || latestAfter.id !== input.evidenceId) {
           throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
         }
+        const rowFinal = await assertStableRow();
         const refreshedWsRepo = githubRepository(wsAfter?.gitRuntime?.remoteUrl) ?? undefined;
-        const listedWsRepo = rowAfter.workspacePull?.repo ?? rowAfter.projectRepo;
+        const listedWsRepo = rowFinal.workspacePull?.repo ?? rowFinal.projectRepo;
         if (refreshedWsRepo && listedWsRepo && refreshedWsRepo.toLowerCase() !== listedWsRepo.toLowerCase()) {
           throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
         }

@@ -40,6 +40,7 @@ async function openIssueBoard(options: {
   onVerifyIssue?: () => void;
   onWorkspaceRefresh?: (count: number) => void;
   onAgentsList?: (count: number) => void;
+  onTimelineRefetch?: (id: string, count: number) => void;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "board-issue-workflow-"));
   dirs.push(dir);
@@ -104,6 +105,7 @@ async function openIssueBoard(options: {
 
   let wsRefreshCount = 0;
   let agentsListCount = 0;
+  let timelineRefetchCount = 0;
   const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
   const sdk = {
     projects: {
@@ -129,14 +131,18 @@ async function openIssueBoard(options: {
       },
       ref: (id: string) => ({
         timeline: {
-          refetch: async () => ({
-            epoch: "1",
-            entries: (timelines.get(id) ?? []).map((text, index) => ({
-              seqEnd: index + 1,
-              timestamp: agents.find(a => a.id === id)?.updatedAt,
-              item: { type: "assistant_message", text },
-            })),
-          }),
+          refetch: async () => {
+            timelineRefetchCount += 1;
+            options.onTimelineRefetch?.(id, timelineRefetchCount);
+            return {
+              epoch: "1",
+              entries: (timelines.get(id) ?? []).map((text, index) => ({
+                seqEnd: index + 1,
+                timestamp: agents.find(a => a.id === id)?.updatedAt,
+                item: { type: "assistant_message", text },
+              })),
+            };
+          },
         },
       }),
     },
@@ -293,44 +299,6 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     receipt: baseReceipt,
   })).rejects.toThrow(/main 브랜치에 반영/);
 
-  // Commit is on main, but checks are pending or failed, or unavailable for source: "ci", or verifiedCommit is older e9fe346 -> rejected.
-  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "pending" });
-  await expect(run("classify_board_conversation", {
-    sessionId: "w308",
-    evidenceId: initialExcerpt.evidenceId,
-    kind: "idle",
-    text: "#308 완료",
-    receipt: baseReceipt,
-  })).rejects.toThrow(/검증 상태가 pending/);
-
-  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "failed" });
-  await expect(run("classify_board_conversation", {
-    sessionId: "w308",
-    evidenceId: initialExcerpt.evidenceId,
-    kind: "idle",
-    text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", summary: "D155 로컬 통과" } },
-  })).rejects.toThrow(/검증 상태가 failed/);
-
-  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
-  await expect(run("classify_board_conversation", {
-    sessionId: "w308",
-    evidenceId: initialExcerpt.evidenceId,
-    kind: "idle",
-    text: "#308 완료",
-    receipt: baseReceipt,
-  })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
-
-  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
-  await expect(run("classify_board_conversation", {
-    sessionId: "w308",
-    evidenceId: initialExcerpt.evidenceId,
-    kind: "idle",
-    text: "#308 완료",
-    receipt: { ...baseReceipt, verifiedCommit: "e9fe346" },
-  })).rejects.toThrow(/검증 커밋.*일치하지 않아/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
-
   // 2. Integration finishes while w308 is running /done -> fail-closed with actionable running message.
   w308.status = "running";
   await expect(run("classify_board_conversation", {
@@ -354,7 +322,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with arbitrary surrounding prose (cleanup hold + unrelated doc task waiting) -> verified receipt succeeds!
+  // 3. Worker finishes /done with arbitrary surrounding prose (cleanup hold + unrelated doc task waiting) -> test commit/check verification guards!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
     "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
@@ -369,9 +337,54 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     receipt: baseReceipt,
   })).rejects.toThrow(/대화가 바뀌었습니다/);
 
-  // Re-reading latest evidenceId with verified receipt succeeds, replaces stale review judgment, and supersedes prior agent-note.
+  // Re-reading latest evidenceId, verify pending / failed / unavailable CI checks, unrelated commit e9fe346, and verifiedCommit mismatch are all rejected!
   const latestExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   expect(latestExcerpt.evidenceId).not.toBe(initialExcerpt.evidenceId);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "pending" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/검증 상태가 pending/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "failed" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", summary: "D155 로컬 통과" } },
+  })).rejects.toThrow(/검증 상태가 failed/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
+  commitStates.set("acme/easydocs@e9fe346", { onMain: true, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, commit: "e9fe346", verifiedCommit: "e9fe346" },
+  })).rejects.toThrow(/통합 근거와 연결되지 않아/);
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: latestExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, verifiedCommit: "e9fe346" },
+  })).rejects.toThrow(/검증 커밋.*일치하지 않아/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: latestExcerpt.evidenceId,
@@ -505,6 +518,18 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     receipt: { kind: "withdrawn", reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
+  // Withdrawing a DIFFERENT request within the same issue (#305 배포 일정 변경) cannot clear the open 2단계 자료 question!
+  w305.updatedAt = "2026-11-26T06:39:00Z";
+  timelines.get("w305")!.push("#305의 배포 일정 변경 요청이 취소됐습니다.");
+  const otherRequestWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: otherRequestWithdraw305.evidenceId,
+    kind: "idle",
+    text: "#305 철회",
+    receipt: { kind: "withdrawn", reason: "배포 일정 변경 취소" },
+  })).rejects.toThrow(/철회·취소 근거/);
+
   // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
   w305.updatedAt = "2026-11-26T06:40:00Z";
   timelines.get("w305")!.push("사용자 요청 철회를 확인했습니다. 2단계 자료 대기 없이 대기합니다.");
@@ -635,12 +660,14 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   let midVerifyAction: (() => void) | undefined;
   let finalRefreshAction: (() => void) | undefined;
   let finalListAction: (() => void) | undefined;
+  let finalTimelineAction: (() => void) | undefined;
   const { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, run } = await openIssueBoard({
     onVerifyIssue: () => midVerifyAction?.(),
     onWorkspaceRefresh: (count) => {
       if (count % 2 === 0) finalRefreshAction?.();
     },
     onAgentsList: () => finalListAction?.(),
+    onTimelineRefetch: () => finalTimelineAction?.(),
   });
   const w308 = agents.find(a => a.id === "w308")!;
   issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
@@ -669,9 +696,10 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     receipt: { ...validReceipt, issue: 999 },
   })).rejects.toThrow(/대상 이슈 번호를 확인할 수 없어/);
 
-  // Restore #308 anchor via title for TOCTOU tests.
+  // Restore #308 anchor via title and cite cf6f661 in closing turn for TOCTOU tests.
   w308.title = "#308 2열 사진 교체 · 구현";
   workspaces[1].title = "EasyDocs #308 · 2열 사진 교체 구현";
+  timelines.set("w308", ["cf6f661 원격 main 반영과 검증을 마쳤습니다."]);
   const ev = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
 
   // 2. New report_to_board arriving during async verification MUST abort idle classification and NEVER be superseded!
@@ -722,6 +750,27 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   expect(prefs.read().judgments.w308).toBeUndefined();
   finalListAction = undefined;
   timelines.get("w308")!.pop();
+
+  // 4b. Session resuming (`running` + updatedAt advanced) DURING the final timeline.refetch() MUST abort idle classification!
+  let refetchCalls = 0;
+  finalTimelineAction = () => {
+    refetchCalls += 1;
+    if (refetchCalls === 2) {
+      w308.status = "running";
+      w308.updatedAt = "2026-11-26T06:59:59Z";
+    }
+  };
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/실행 중인 세션|세션 갱신 시점이 바뀌었습니다/);
+  expect(prefs.read().judgments.w308).toBeUndefined();
+  finalTimelineAction = undefined;
+  w308.status = "idle";
+  w308.updatedAt = "2026-11-26T05:50:00Z";
 
   // 5. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
   midVerifyAction = () => {
