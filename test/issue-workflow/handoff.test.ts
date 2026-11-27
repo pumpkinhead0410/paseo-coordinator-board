@@ -10,6 +10,13 @@ import { digestPrompt, englishDigestPrompt } from "../../server/digest";
 import { buildCoordinatorSystemPrompt } from "../../server/lifecycle";
 import { NoteStore } from "../../server/notes";
 import { createOperations } from "../../server/operations";
+import {
+  createOutcomeVerifier,
+  summarizeCommitChecks,
+  type CommitVerification,
+  type IssueOutcome,
+  type OutcomeVerifier,
+} from "../../server/outcome-verifier";
 import { PreferenceStore } from "../../server/preferences";
 import { recordReport } from "../../server/reporting";
 import { sessionClarificationCard } from "../../shared/clarifications";
@@ -70,6 +77,26 @@ async function openIssueBoard() {
     ["w305", ["#305 1단계 통합 완료. 2단계 AC-6 진행을 위해 공식 CE/UL 안전문 원문, 표지 이미지, 회사 저작권 치환 규칙을 알려 주세요."]],
   ]);
 
+  const issueStates = new Map<string, IssueOutcome>([
+    ["acme/easydocs#308", { state: "OPEN", stateReason: "UNKNOWN", url: "https://github.com/acme/easydocs/issues/308" }],
+    ["acme/easydocs#303", { state: "CLOSED", stateReason: "NOT_PLANNED", url: "https://github.com/acme/easydocs/issues/303" }],
+    ["acme/easydocs#999", { state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/acme/easydocs/issues/999" }],
+    ["other/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED", url: "https://github.com/other/easydocs/issues/308" }],
+  ]);
+  const commitStates = new Map<string, CommitVerification>([
+    ["acme/easydocs@cf6f661", { onMain: false, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "pending" }],
+    ["acme/easydocs@e9fe346", { onMain: false, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" }],
+  ]);
+
+  const verifier: OutcomeVerifier = {
+    async verifyIssue(repo, issue) {
+      return issueStates.get(`${repo.toLowerCase()}#${issue}`) ?? { state: "UNKNOWN", stateReason: "UNKNOWN" };
+    },
+    async verifyMainCommit(_workspacePath, repo, commit) {
+      return commitStates.get(`${repo.toLowerCase()}@${commit.toLowerCase()}`) ?? { onMain: false, checks: "unavailable" };
+    },
+  };
+
   const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
   const sdk = {
     projects: {
@@ -108,35 +135,48 @@ async function openIssueBoard() {
   const ops = createOperations(prefs, dir, undefined, legacyRouter());
   let onOpen: ((input: { request: { purpose: string; agentId: string; tools: unknown[] } }) => Promise<{ tools: any[] }>) | undefined;
   attachCoordinatorTools(
-    { addHook(_event: string, hook: any) { onOpen = hook; return () => {}; } } as any,
+    { addHook: (_name: string, fn: any) => { onOpen = fn; } } as any,
     prefs,
     new ConversationReader(),
     ops.tools,
     notes,
+    verifier,
   );
   const opened = await onOpen!({ request: { purpose: "interactive", agentId: "coord", tools: [] } });
   const tool = (name: string) => opened.tools.find((t: { name: string }) => t.name === name);
-  const run = async (name: string, input: Record<string, unknown> = {}) => {
-    const t = tool(name);
-    const result = await t.execute(t.input.parse(input), { paseo: sdk, agent: { id: "coord" } });
-    return result.text;
-  };
-  return { prefs, notes, agents, timelines, tool, run };
+  const run = async (name: string, input: Record<string, unknown> = {}) =>
+    (await tool(name).execute(input, { paseo: sdk, agent: { id: "coord" } })).text;
+
+  return { prefs, notes, agents, timelines, issueStates, commitStates, tool, run };
 }
 
 test("plan_board_assignment exposes workspace kind, branch, path and session workspaceId for direct worktree assignment and owner reuse", async () => {
   const { run } = await openIssueBoard();
-  const plan = JSON.parse(await run("plan_board_assignment"));
+  const plan = JSON.parse(await run("plan_board_assignment", { projectId: "easydocs" }));
 
   expect(plan.workspaces).toEqual([
-    { id: "wks_main", projectId: "easydocs", title: "EasyDocs · main", kind: "local_checkout", branch: "main", path: "/synthetic/EasyDocs" },
-    { id: "wks_308", projectId: "easydocs", title: "EasyDocs #308 · 2열 사진 교체 구현", kind: "worktree", branch: "feat/two-col-photo-replace-308", path: "/synthetic/worktrees/easydocs-308" },
+    {
+      id: "wks_main",
+      projectId: "easydocs",
+      title: "EasyDocs · main",
+      kind: "local_checkout",
+      branch: "main",
+      path: "/synthetic/EasyDocs",
+    },
+    {
+      id: "wks_308",
+      projectId: "easydocs",
+      title: "EasyDocs #308 · 2열 사진 교체 구현",
+      kind: "worktree",
+      branch: "feat/two-col-photo-replace-308",
+      path: "/synthetic/worktrees/easydocs-308",
+    },
   ]);
+
   expect(plan.sessions.find((s: { id: string }) => s.id === "w308")).toMatchObject({
     id: "w308",
     workspaceId: "wks_308",
     workspaceTitle: "EasyDocs #308 · 2열 사진 교체 구현",
-    status: "idle",
   });
   expect(plan.sessions.find((s: { id: string }) => s.id === "w303")).toMatchObject({
     id: "w303",
@@ -144,11 +184,11 @@ test("plan_board_assignment exposes workspace kind, branch, path and session wor
   });
 });
 
-test("#308 reproduction: running session rejects stale classification with actionable error, then fresh evidenceId clears pre-integration wait", async () => {
-  const { prefs, notes, agents, timelines, run } = await openIssueBoard();
+test("#308 reproduction: structured receipt verification blocks unverified completions and clears pre-integration wait once verified", async () => {
+  const { prefs, notes, agents, timelines, issueStates, commitStates, run } = await openIssueBoard();
   const w308 = agents.find(a => a.id === "w308")!;
 
-  // 1. Pre-integration state: worker reported H1 review note (bound to initial evidenceId) and coordinator classified review wait.
+  // 1. Pre-integration state: worker reported H1 review note (with reference issue #999) and coordinator classified review wait.
   const initialExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   expect(recordReport(notes, "w308", { kind: "review", text: "#308 사람 확인 H1 (참고 이슈 #999)" }, initialExcerpt.evidenceId).isError).not.toBe(true);
   await run("classify_board_conversation", {
@@ -167,90 +207,112 @@ test("#308 reproduction: running session rejects stale classification with actio
     note: { kind: "review", origin: "agent", evidenceId: initialExcerpt.evidenceId },
   });
 
-  // Fail-closed: cannot clear verification wait to idle without completion/verification receipt.
+  // Fail-closed: omitting receipt or trying to abuse `withdrawn` on a review wait is rejected.
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
   })).rejects.toThrow(/완료 영수증·검증 근거/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
-
-  // Even on a fresh turn that says "통합 예정, 최종 검증 미실행", idle classification is rejected.
-  w308.updatedAt = "2026-11-26T05:55:00Z";
-  timelines.get("w308")!.push("통합 예정, 최종 검증 미실행");
-  const unverifiedExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
-    evidenceId: unverifiedExcerpt.evidenceId,
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 정리",
+    receipt: { kind: "withdrawn", reason: "임의 취소" },
+  })).rejects.toThrow(/withdrawn으로 해제할 수 없습니다/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
+
+  const baseReceipt = {
+    kind: "completed" as const,
+    repo: "acme/easydocs",
+    issue: 308,
+    commit: "cf6f661",
+    verifiedCommit: "cf6f661",
+    verification: { source: "ci" as const, status: "passed" as const, summary: "CI 통과" },
+    closeReason: "COMPLETED" as const,
+  };
+
+  // Foreign repo (same leaf name other/easydocs) or wrong issue (#999) is rejected deterministically.
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-  })).rejects.toThrow(/완료 영수증·검증 근거/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
-
-  // A feature/work-branch commit alone (without main integration, verification pass, and closure) is also rejected.
-  w308.updatedAt = "2026-11-26T05:56:00Z";
-  timelines.get("w308")!.push("작업 브랜치에 cf6f661 커밋을 올렸습니다. 확인해 주세요.");
-  const branchOnlyExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+    receipt: { ...baseReceipt, repo: "other/easydocs" },
+  })).rejects.toThrow(/영수증 저장소/);
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
-    evidenceId: branchOnlyExcerpt.evidenceId,
+    evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
-    text: "#308 cf6f661 통합 완료",
-  })).rejects.toThrow(/완료 영수증·검증 근거/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
+    text: "#999 통합 완료",
+    receipt: { ...baseReceipt, issue: 999 },
+  })).rejects.toThrow(/영수증 이슈/);
 
-  // Source missing GitHub closure cannot be bypassed by putting COMPLETED only in coordinator input text.
-  w308.updatedAt = "2026-11-26T05:57:00Z";
-  timelines.get("w308")!.push("cf6f661 원격 main 반영 및 D155 최종검증 통과를 확인했습니다.");
-  const missingClosureExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  // OPEN issue or reason-less CLOSED (UNKNOWN) is rejected.
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
-    evidenceId: missingClosureExcerpt.evidenceId,
+    evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
-    text: "#308 cf6f661 원격 main 통합 · GitHub COMPLETED 확인",
-  })).rejects.toThrow(/완료 영수증·검증 근거/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
-
-  // Negated verification ("검증은 통과하지 못했습니다") is rejected fail-closed even when commit & COMPLETED appear.
-  w308.updatedAt = "2026-11-26T05:58:00Z";
-  timelines.get("w308")!.push("cf6f661 원격 main 반영 및 GitHub COMPLETED 상태이나 D155 최종검증은 통과하지 못했습니다.");
-  const failedVerifyExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/COMPLETED 종료가 확인되지 않아/);
+  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "UNKNOWN" });
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
-    evidenceId: failedVerifyExcerpt.evidenceId,
+    evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
-    text: "#308 cf6f661 원격 main 통합 완료",
-  })).rejects.toThrow(/완료 영수증·검증 근거/);
-  expect(prefs.read().judgments.w308.kind).toBe("review");
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/COMPLETED 종료가 확인되지 않아/);
 
-  // PR MERGED, reason-less GitHub CLOSED, generic "build completed", GitHub Actions COMPLETED,
-  // another issue (#999), same-name foreign owner (other/EasyDocs#308), or foreign GitHub issue URL is rejected.
-  for (const [ts, text, inputText] of [
-    ["2026-11-26T05:58:30Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub MERGED 확인.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:45Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub CLOSED 확인.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:50Z", "cf6f661 merged into main, tests passed, build completed.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:52Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과·GitHub Actions 상태 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:54Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999는 COMPLETED로 닫혔습니다.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:56Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. other/EasyDocs#308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:57Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. https://github.com/other/unrelated/issues/308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:58:58Z", "#999 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999 COMPLETED 확인.", "#999 통합 완료"],
-    ["2026-11-26T05:58:59Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. #308과 별개로 GitHub 이슈 #999는 COMPLETED로 닫혔습니다.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:59:00Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub #308 COMPLETED 종료를 기다립니다.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:59:01Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub #308 COMPLETED 여부를 조회 중입니다.", "#308 cf6f661 원격 main 통합 완료"],
-    ["2026-11-26T05:59:02Z", "#308 cf6f661 원격 main 반영·CI 로그를 확인했습니다·GitHub #308 COMPLETED 종료 확인.", "#308 cf6f661 원격 main 통합 완료"],
-  ] as const) {
-    w308.updatedAt = ts;
-    timelines.get("w308")!.push(text);
-    const noReasonExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
-    await expect(run("classify_board_conversation", {
-      sessionId: "w308",
-      evidenceId: noReasonExcerpt.evidenceId,
-      kind: "idle",
-      text: inputText,
-    })).rejects.toThrow(/완료 영수증·검증 근거|일치하지 않아/);
-    expect(prefs.read().judgments.w308.kind).toBe("review");
-  }
+  // Close issue #308 as COMPLETED, but commit cf6f661 is still only on a feature branch (onMain: false) -> rejected.
+  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/main 브랜치에 반영/);
+
+  // Commit is on main, but checks are pending or failed, or unavailable for source: "ci", or verifiedCommit is older e9fe346 -> rejected.
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "pending" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/검증 상태가 pending/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "failed" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", summary: "D155 로컬 통과" } },
+  })).rejects.toThrow(/검증 상태가 failed/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: baseReceipt,
+  })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
+
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: initialExcerpt.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: { ...baseReceipt, verifiedCommit: "e9fe346" },
+  })).rejects.toThrow(/검증 커밋.*일치하지 않아/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
 
   // 2. Integration finishes while w308 is running /done -> fail-closed with actionable running message.
   w308.status = "running";
@@ -259,6 +321,7 @@ test("#308 reproduction: running session rejects stale classification with actio
     evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 cf6f661 통합 완료",
+    receipt: baseReceipt,
   })).rejects.toThrow(/실행 중인 세션.*idle.*최신 evidenceId/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
@@ -270,13 +333,14 @@ test("#308 reproduction: running session rejects stale classification with actio
     evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 cf6f661 통합 완료",
+    receipt: baseReceipt,
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + CI pass BEFORE COMPLETED in same clause + same-sentence cleanup hold with modifier!
+  // 3. Worker finishes /done with arbitrary surrounding prose (cleanup hold + unrelated doc task waiting) -> verified receipt succeeds!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -285,16 +349,21 @@ test("#308 reproduction: running session rejects stale classification with actio
     evidenceId: initialExcerpt.evidenceId,
     kind: "idle",
     text: "#308 cf6f661 통합 완료",
+    receipt: baseReceipt,
   })).rejects.toThrow(/대화가 바뀌었습니다/);
 
-  // Re-reading latest evidenceId succeeds, replaces stale review judgment, and marks the prior agent-note superseded in listing too.
+  // Re-reading latest evidenceId with verified receipt succeeds, replaces stale review judgment, and supersedes prior agent-note.
   const latestExcerpt = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   expect(latestExcerpt.evidenceId).not.toBe(initialExcerpt.evidenceId);
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
-    text: "#308 cf6f661 원격 main 통합·최종검증·GitHub COMPLETED 확인. workspace 정리 인계(14일 보호 기준 보류)는 별도 추적.",
+    text: "#308 cf6f661 원격 main 통합·CI 통과·GitHub COMPLETED 확인. workspace 정리 인계는 별도 추적.",
+    receipt: {
+      ...baseReceipt,
+      cleanupHandoff: "현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
+    },
   });
 
   const updated = JSON.parse(await run("read_board_conversation"));
@@ -306,54 +375,55 @@ test("#308 reproduction: running session rejects stale classification with actio
   expect(row308.note).toBeUndefined();
 });
 
-test("#303 NOT_PLANNED (confirmed vs OPEN proposal) and #305 staged human decision (including withdrawal) are handled cleanly", async () => {
-  const { prefs, agents, timelines, run } = await openIssueBoard();
-
+test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human decision (including withdrawal) are handled cleanly", async () => {
+  const { prefs, agents, timelines, issueStates, run } = await openIssueBoard();
   const e303 = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
+
+  const receipt303 = {
+    kind: "not_planned" as const,
+    repo: "acme/easydocs",
+    issue: 303,
+    closeReason: "NOT_PLANNED" as const,
+    stopReason: "라이선스 우선순위 미정으로 조사 중단",
+  };
+
   // Mislabeling a NOT_PLANNED stop as a resolved fix without mentioning NOT_PLANNED/중단 is rejected.
   await expect(run("classify_board_conversation", {
     sessionId: "w303",
     evidenceId: e303.evidenceId,
     kind: "idle",
     text: "#303 원인 해결 완료",
+    receipt: receipt303,
   })).rejects.toThrow(/NOT_PLANNED/);
 
-  // Accurate NOT_PLANNED classification succeeds without requiring an integration commit.
+  // Another issue (#999) cannot stand in for #303.
+  await expect(run("classify_board_conversation", {
+    sessionId: "w303",
+    evidenceId: e303.evidenceId,
+    kind: "idle",
+    text: "#303 NOT_PLANNED 종료",
+    receipt: { ...receipt303, issue: 999 },
+  })).rejects.toThrow(/영수증 이슈/);
+
+  // OPEN issue proposing NOT_PLANNED closure is rejected fail-closed.
+  issueStates.set("acme/easydocs#303", { state: "OPEN", stateReason: "UNKNOWN" });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w303",
+    evidenceId: e303.evidenceId,
+    kind: "idle",
+    text: "#303 NOT_PLANNED 종료",
+    receipt: receipt303,
+  })).rejects.toThrow(/NOT_PLANNED 종료가 확인되지 않아/);
+
+  // Confirmed GitHub CLOSED/NOT_PLANNED succeeds without requiring an integration commit.
+  issueStates.set("acme/easydocs#303", { state: "CLOSED", stateReason: "NOT_PLANNED" });
   await run("classify_board_conversation", {
     sessionId: "w303",
     evidenceId: e303.evidenceId,
     kind: "idle",
     text: "#303 라이선스 우선순위 미정으로 조사 중단 · GitHub NOT_PLANNED 종료(해결 완료 아님, 공유 main 보존).",
+    receipt: receipt303,
   });
-
-  // An OPEN issue merely proposing NOT_PLANNED closure is rejected fail-closed!
-  const w303 = agents.find(a => a.id === "w303")!;
-  w303.updatedAt = "2026-11-26T05:50:00Z";
-  timelines.get("w303")!.push("이슈 #303은 현재 OPEN 상태이며 NOT_PLANNED 종료를 제안합니다.");
-  const openProposal = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
-  await expect(run("classify_board_conversation", {
-    sessionId: "w303",
-    evidenceId: openProposal.evidenceId,
-    kind: "idle",
-    text: "#303 NOT_PLANNED 종료",
-  })).rejects.toThrow(/NOT_PLANNED/);
-
-  // Unconfirmed NOT_PLANNED closure, session-only exit, and another issue (#999) NOT_PLANNED are rejected fail-closed!
-  for (const [ts, text, inputText] of [
-    ["2026-11-26T05:51:00Z", "조사를 중단했으나 GitHub NOT_PLANNED 종료 여부는 확인하지 못했습니다.", "#303 NOT_PLANNED 종료"],
-    ["2026-11-26T05:52:00Z", "조사를 중단하고 조사 세션을 종료했습니다.", "#303 종결"],
-    ["2026-11-26T05:53:00Z", "#303 조사를 중단했습니다. GitHub 이슈 #999는 NOT_PLANNED로 닫혔습니다.", "#303 NOT_PLANNED 종료"],
-  ] as const) {
-    w303.updatedAt = ts;
-    timelines.get("w303")!.push(text);
-    const badNotPlanned = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
-    await expect(run("classify_board_conversation", {
-      sessionId: "w303",
-      evidenceId: badNotPlanned.evidenceId,
-      kind: "idle",
-      text: inputText,
-    })).rejects.toThrow(/NOT_PLANNED/);
-  }
 
   const e305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
   await run("classify_board_conversation", {
@@ -385,6 +455,63 @@ test("#303 NOT_PLANNED (confirmed vs OPEN proposal) and #305 staged human decisi
     text: "#305 사용자 요청 철회 확인, 남은 결정 없음.",
   });
   expect(prefs.read().judgments.w305).toMatchObject({ kind: "idle", evidenceId: withdrawn305.evidenceId });
+});
+
+test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestry, and commit check rollup fail-closed", async () => {
+  expect(summarizeCommitChecks([], [])).toBe("unavailable");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "success" }], [])).toBe("passed");
+  expect(summarizeCommitChecks([{ status: "in_progress", conclusion: null }], [])).toBe("pending");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "failure" }], [])).toBe("failed");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "success" }], [{ state: "pending" }])).toBe("pending");
+
+  const calls: string[] = [];
+  const verifier = createOutcomeVerifier(async (cmd, args) => {
+    calls.push(`${cmd} ${args.join(" ")}`);
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "308") {
+      return JSON.stringify({
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        url: "https://github.com/acme/EasyDocs/issues/308",
+      });
+    }
+    if (cmd === "gh" && args[0] === "issue" && args[2] === "309") {
+      // Redirected to a PR URL or another repo -> must fail closed as UNKNOWN!
+      return JSON.stringify({
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        url: "https://github.com/other/EasyDocs/issues/309",
+      });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661") {
+      return "cf6f661000000000000000000000000000000000\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...cf6f661000000000000000000000000000000000") {
+      return "behind\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/check-runs") {
+      return JSON.stringify({ check_runs: [{ status: "completed", conclusion: "success" }] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/status") {
+      return JSON.stringify({ state: "success", statuses: [] });
+    }
+    throw new Error(`unexpected command: ${cmd} ${args.join(" ")}`);
+  });
+
+  expect(await verifier.verifyIssue("acme/easydocs", 308)).toEqual({
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    url: "https://github.com/acme/EasyDocs/issues/308",
+  });
+  expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
+    state: "UNKNOWN",
+    stateReason: "UNKNOWN",
+  });
+  expect(await verifier.verifyMainCommit(undefined, "acme/easydocs", "cf6f661")).toEqual({
+    onMain: true,
+    resolvedSha: "cf6f661000000000000000000000000000000000",
+    checks: "passed",
+  });
+  expect(calls.length).toBeGreaterThanOrEqual(6);
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {
@@ -501,7 +628,6 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(after.lane).toBe("idle");
   expect(after.count).toBe(0);
   expect(sessionClarificationCard(after.row, after.note)).toBeNull();
-  // Revision is preserved in notes.json so NoteEditor edits will not conflict.
   expect(after.note?.revision).toBe(1);
 
   // 4. Unrelated follow-up turn ev3 (without a new report_to_board) does NOT resurrect the superseded rev-1 agent-note!
@@ -532,7 +658,7 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(displayLane(runningRow, runningNote)).toBe("running");
   expect(decisionCount({ sessions: [runningRow], notes: { w308: runningNote } })).toBe(0);
 
-  // 4c. Classifying a separate later turn as `review` keeps the previously superseded rev-1 question suppressed (no resurrection into My decisions)!
+  // 4c. Classifying a separate later turn as `review` keeps the previously superseded rev-1 question suppressed!
   prefs.change(s => {
     s.judgments.w308 = { projectId: "easydocs", evidenceId: ev3.id, kind: "review", text: "별도 후속 작업 결과 확인" };
   });

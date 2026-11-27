@@ -99,6 +99,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 8차 `14272eb7` 지적 2건 반영)**:
   1. `pendingClosureOrCheckPattern`을 추가해 종료 대기(“COMPLETED 종료를 기다립니다”)와 조회 중(“COMPLETED 여부를 조회 중입니다”)을 거절하고, `verificationReceiptPattern`이 CI/검증 실행에 대해 단순 로그 확인(“CI 로그를 확인했습니다”)이 아니라 실제 통과·성공 결과나 영수증을 요구하도록 강화했습니다(`server/coordinator.ts`).
   2. `extractClosureClaims`가 `GitHub`/`이슈` 등 명시적 이슈 주체가 있는 종료 구문에서는 앞선 `CI 통과와 `를 비-이슈 주체로 섞지 않도록 수정해 문장 순서와 무관하게 `CI 통과와 GitHub #308 COMPLETED 종료를 확인했습니다`를 수락하도록 했습니다(`server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 9차 `14272eb7` 근본 구조 전환)**:
+  - 자유 문장 정규식 대조의 구조적 한계(조건부 종료, 타 커밋 검증, 별도 작업 대기 문구 혼입)를 제거하기 위해 `classify_board_conversation`에 구조화된 `receipt`(`completed`·`not_planned`·`withdrawn`)와 실/주입 가능 `OutcomeVerifier`(`server/outcome-verifier.ts`)를 도입했습니다(`server/preferences.ts`, `server/coordinator.ts`).
+  - `completed` 영수증은 대상 저장소(`owner/repo`)·세션 앵커 이슈 번호·GitHub 이슈 `CLOSED`/`COMPLETED`·커밋 `main` 조상 여부·`verifiedCommit === commit`·커밋 체크(`passed`, 실패/대기 시 거절)를 결정적으로 검증하고, 정리 인계(`cleanupHandoff`)와 별도 작업 서술을 제품 증빙 판정에서 완전히 분리합니다. `not_planned` 영수증은 통합 커밋 없이 대상 이슈의 GitHub `CLOSED`/`NOT_PLANNED`를 직접 검증합니다.
 
 ## Acceptance criteria
 

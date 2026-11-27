@@ -5,212 +5,126 @@ import { isSupersededAgentNote } from "./decisions";
 import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
-import { isManagedCoordinator, judgment, PreferenceStore } from "./preferences";
+import { createOutcomeVerifier, type OutcomeVerifier } from "./outcome-verifier";
+import { isManagedCoordinator, judgment, PreferenceStore, type CompletionReceipt } from "./preferences";
+import { githubRepository } from "../shared/github-repository";
 
-const integrationCompletionClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현)\s*(?:완료|반영|종료)|\b(?:merged|integrated|completed)\b/i;
+const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
 const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
-const pendingIntegrationOrVerificationPattern = /(?:통합|병합|머지|검증|테스트|시험)\s*(?:예정|대기|미실행|미검증|미완|불충족|필요|남았|남아)|최종\s*검증(?:이|은)?\s*(?:남았|남아|대기|미실행|미검증|필요)|\b(?:not\s+(?:verified|tested|completed|merged)|verification\s+(?:pending|remaining)|integration\s+(?:pending|remaining)|tests?\s+failed)\b/i;
-const negatedOutcomePattern = /(?:통과|검증|확인|완료|닫혔|닫힘|닫히|종료|반영|통합|포함)(?:을|를|은|는|이|가|지|\s*여부(?:는|를|가)?)?\s*(?:하지\s*못|못\s*했|못함|하지\s*않|않았|되지\s*않|안\s*됨|실패|미확인|미완료|불가)|(?:검증|테스트|시험|CI)\s*(?:이|가|은|는)?\s*실패|\b(?:did\s+not\s+(?:pass|verify|confirm|close)|not\s+(?:confirmed|closed|verified|passed)|unconfirmed|failed\s+to\s+(?:pass|verify|confirm|close))\b/i;
-const commitShaPattern = /\b[0-9a-f]{7,40}\b/i;
-const mainIntegrationTargetPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:main|master)\s*통합\s*커밋|통합\s*커밋|\bmerged\s+into\s+(?:origin\/)?(?:main|master)\b/i;
-const verificationReceiptPattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|\bCI\b|D155|회귀|단위\s*시험|테스트|시험)(?:\s*(?:결과|모두|전체|항목))?.{0,24}(?:통과|성공|일치|PASS|0\s*fail|오류\s*없|이상\s*없)|(?:검증\s*자료|manifest\.json|영수증|SHA-256).{0,24}(?:통과|완료|성공|일치|PASS|확인)|(?:통과|성공|PASS)\s*(?:영수증|근거|기록)|\b(?:verified|tests?\s+passed|ci\s+passed)\b/i;
-const pendingClosureOrCheckPattern = /(?:기다(?:리|립|림|렸|려)|대기(?:하|중|\s*중)?|조회\s*중|확인\s*중|진행\s*중|처리\s*중|예정|남았|남아|여부(?:를|는|가)?\s*(?:조회|확인|대기|기다|점검)|\b(?:waiting\s+for|pending|checking|in\s+progress|expected|to\s+be\s+closed)\b)/i;
-const nonIssueStatusPattern = /(?:GitHub\s+Actions|\bActions\b|workflow|워크플로(?:우)?|\bchecks?\b|체크|\bjobs?\b|\bpipeline\b|파이프라인|\b(?:pull\s*request|PR)\b(?:\s*#\d+)?|\/pull\/\d+|\bCI\b(?:\s*(?:실행|상태|워크플로|체크|잡))?|빌드|\bbuild\b|배포|\bdeployment\b|세션|\bsession\b)/i;
-const issueRefToken = String.raw`(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)`;
-const issueRefList = String.raw`${issueRefToken}(?:\s*(?:·|,|과|와|및)\s*${issueRefToken})*`;
-const completedClosureMatchPattern = new RegExp(
-  [
-    String.raw`(?:GitHub(?:\s*에서)?\s*)?(?:이슈\s*|issue\s*)?${issueRefList}\s*(?:가|는|를|이|은|:|=)?\s*(?:(?:GitHub(?:\s*에서)?\s*)?(?:로|으로)?\s*\bCOMPLETED\b(?:\s*(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)?|확인))?|완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+[Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee][Dd]\b)`,
-    String.raw`(?:GitHub(?:\s*에서)?(?:\s*(?:이슈|issue))?|이슈|issue|stateReason|종료\s*사유)\s*(?:가|는|를|이|은|:|=)?\s*(?:로|으로)?\s*(?:\bCOMPLETED\b(?:\s*(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)?|확인))?|완료(?:로)?\s*(?:닫혔|닫힘|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인)))`,
-    String.raw`\bCOMPLETED\b(?:로|으로)?\s*(?:닫혔|닫힘|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
-    String.raw`\bclosed\s+as\s+[Cc][Oo][Mm][Pp][Ll][Ee][Tt][Ee][Dd]\b`,
-  ].join("|"),
-  "g",
-);
-const openOrProposalPattern = /\bOPEN\b|열려\s*있|닫을까요|종료할까요|닫는\s*것을\s*제안|종료를\s*제안|제안합니다|\b(?:still\s+open|propose\s+closing|should\s+we\s+close)\b/i;
-const notPlannedClosureMatchPattern = new RegExp(
-  [
-    String.raw`(?:GitHub(?:\s*에서)?\s*)?(?:이슈\s*|issue\s*)?${issueRefList}\s*(?:가|는|를|이|은|:|=)?\s*(?:(?:GitHub(?:\s*에서)?\s*)?\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))|\bclosed\s+as\s+[Nn][Oo][Tt]_[Pp][Ll][Aa][Nn][Nn][Ee][Dd]\b)`,
-    String.raw`(?:GitHub(?:\s*에서)?\s*)?\bNOT_PLANNED\b(?:로|으로)?\s*(?:닫혔|닫힌|종료(?:됐|됨|했|되었|\s*확인|를\s*확인|됨을\s*확인))`,
-    String.raw`\bclosed\s+as\s+[Nn][Oo][Tt]_[Pp][Ll][Aa][Nn][Nn][Ee][Dd]\b`,
-  ].join("|"),
-  "g",
-);
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
-const cleanupClausePattern = /(?:작업\s*폴더|워크스페이스|workspace|worktree|작업\s*트리|로컬\s*브랜치|정리\s*인계|폴더\s*정리|브랜치\s*정리|사용\s*종료|정리(?:는|를|가|의)?\s*(?:아직|별도|보류|추후|미진행)|cleanup|local\s+branch|active\s+use)/i;
-const productEvidenceClausePattern = /(?:최종\s*검증|전체\s*(?:검사|검증|시험|테스트)|로컬\s*검증|회귀|\bCI\b|D155|GitHub|\bCOMPLETED\b|\bNOT_PLANNED\b|원격\s*main|main\s*(?:에\s*)?(?:통합|반영|병합|머지|포함))/i;
-const clauseConnectorSplitPattern = /(?<=(?:했고|하고|했으며|하며|했지만|하지만|했으나|하나|하였고|하였으며|하였지만|하였으나|하였는데|됐고|되고|됐지만|됐으나|됐는데|되었고|되었으나|되었지만|되었으며|되었는데|했는데|하는데|상태이나|상태이지만|완료했고|확인했고|통과했고|닫혔고|종료됐고|종료되었고|중단했고|중단했으나|보류하지만|보류했으나|보류했고|보류하고|보류하며|보류했으며|보류했지만|남겨두지만|유지하지만|\band\b|\bbut\b|\bwhile\b|\bhowever\b))\s+/i;
 
-function stripReferenceMentions(text: string): string {
-  return text.replace(referenceIssuePattern, " ");
-}
-
-function extractRepoIssueRefs(text: string): { issues: Set<string>; repos: Set<string> } {
-  const withoutPr = text
+function extractAnchoredIssues(text: string): Set<number> {
+  const cleaned = text
+    .replace(referenceIssuePattern, " ")
     .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi, " ")
     .replace(/(?:\bPR\b|pull\s*request|풀\s*리퀘스트)\s*#\d+\b/gi, " ");
-  const issues = new Set<string>();
-  const repos = new Set<string>();
-  for (const match of withoutPr.matchAll(/https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/(\d+)\b/gi)) {
-    repos.add(match[1].toLowerCase());
-    issues.add(match[2]);
+  const issues = new Set<number>();
+  for (const match of cleaned.matchAll(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/(\d+)\b/gi)) {
+    const n = Number(match[1]);
+    if (Number.isSafeInteger(n) && n > 0) issues.add(n);
   }
-  const withoutIssueUrls = withoutPr.replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+\b/gi, " ");
-  for (const match of withoutIssueUrls.matchAll(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)\b/g)) {
-    if (match[1]) repos.add(match[1].toLowerCase());
-    issues.add(match[2]);
+  const withoutUrls = cleaned.replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+\b/gi, " ");
+  for (const match of withoutUrls.matchAll(/(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#(\d+)\b/g)) {
+    const n = Number(match[1]);
+    if (Number.isSafeInteger(n) && n > 0) issues.add(n);
   }
-  return { issues, repos };
+  return issues;
 }
 
-function repoMatchesExpected(repo: string, expectedRepo?: string): boolean {
-  if (!expectedRepo) return false;
-  return repo.toLowerCase() === expectedRepo.toLowerCase();
+function sameCommitRef(a: string, b: string, resolvedSha?: string): boolean {
+  const na = a.trim().toLowerCase();
+  const nb = b.trim().toLowerCase();
+  if (resolvedSha) {
+    const full = resolvedSha.toLowerCase();
+    return full.startsWith(na) && full.startsWith(nb);
+  }
+  return na === nb || na.startsWith(nb) || nb.startsWith(na);
 }
 
-function productOutcomeClauses(text: string): string[] {
-  return text
-    .replace(/\(([^()]*)\)/g, "\n$1\n")
-    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|,\s+|(?<!#\d+)\s*·\s*(?!#\d+\b)|\s+및\s+(?=(?:GitHub|이슈|issue|작업\s*폴더|워크스페이스|정리)))/i)
-    .flatMap(segment => segment.split(clauseConnectorSplitPattern))
-    .map(clause => clause.trim())
-    .filter(clause => clause.length > 0 && !(cleanupClausePattern.test(clause) && !productEvidenceClausePattern.test(clause)));
-}
-
-type ClosureClaim = { issues: Set<string>; repos: Set<string> };
-
-function extractClosureClaims(clauses: string[], pattern: RegExp): ClosureClaim[] {
-  const claims: ClosureClaim[] = [];
-  for (const clause of clauses) {
-    if (openOrProposalPattern.test(clause)) continue;
-    for (const match of clause.matchAll(pattern)) {
-      const start = match.index ?? 0;
-      const matched = match[0];
-      const hasExplicitIssueSubject = /^(?:GitHub|이슈|issue|stateReason|종료\s*사유)/i.test(matched);
-      const rawPrefix = clause.slice(Math.max(0, start - 24), start);
-      const localPrefix = hasExplicitIssueSubject
-        ? ""
-        : rawPrefix.replace(/^.*(?:별개로|대신|외에|말고|제외하고|이고|이나|이며|및|와|과|후|뒤|,|;|·)\s*/i, "");
-      const rawSuffix = clause.slice(start + matched.length, start + matched.length + 28);
-      const localSuffix = rawSuffix.split(/(?:(?:와|과)\s+|및\s+|하고\s+|했고\s+|했지만\s+|했으나\s+)/)[0] ?? "";
-      if (nonIssueStatusPattern.test(`${localPrefix}${matched}`)) continue;
-      if (negatedOutcomePattern.test(`${matched}${localSuffix}`) || pendingClosureOrCheckPattern.test(`${matched}${localSuffix}`)) continue;
-      const refs = extractRepoIssueRefs(matched);
-      claims.push(refs);
-    }
-  }
-  return claims;
-}
-
-function closureCoversTargets(
-  claims: ClosureClaim[],
-  targetIssues: Set<string>,
-  lastText: string,
-  expectedRepo?: string,
-): boolean {
-  const validClaims = claims.filter(claim => [...claim.repos].every(repo => repoMatchesExpected(repo, expectedRepo)));
-  if (validClaims.length === 0) return false;
-
-  const { issues: allTextIssues, repos: allTextRepos } = extractRepoIssueRefs(stripReferenceMentions(lastText));
-  if (targetIssues.size === 0) {
-    return [...allTextRepos].every(repo => repoMatchesExpected(repo, expectedRepo));
-  }
-
-  const coveredExplicit = new Set<string>();
-  let hasUnnumberedClosure = false;
-  for (const claim of validClaims) {
-    if (claim.issues.size === 0) {
-      hasUnnumberedClosure = true;
-    } else {
-      for (const id of claim.issues) coveredExplicit.add(id);
-    }
-  }
-  if ([...targetIssues].every(id => coveredExplicit.has(id))) return true;
-  if (hasUnnumberedClosure) {
-    if (![...allTextRepos].every(repo => repoMatchesExpected(repo, expectedRepo))) return false;
-    if (
-      allTextIssues.size === 0 ||
-      ([...targetIssues].every(id => allTextIssues.has(id)) && [...allTextIssues].every(id => targetIssues.has(id)))
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function unverifiedIdleReason(
+export async function verifyIdleClassification(
   latest: Evidence,
-  inputText: string,
+  input: { text: string; receipt?: CompletionReceipt },
   context: {
     previousKind?: "question" | "review" | "idle";
     previousText?: string;
+    activeNoteKind?: "question" | "review" | "done" | "clear";
     activeNoteText?: string;
     sessionTitle?: string;
     workspaceTitle?: string;
+    workspacePath?: string;
     expectedRepo?: string;
     hasActiveAgentNote: boolean;
     isClarificationReply: boolean;
   },
-): string | null {
+  verifier: OutcomeVerifier,
+): Promise<string | null> {
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
-  const clauses = last ? productOutcomeClauses(last.text) : [];
-  const mentionsNotPlanned = /\bNOT_PLANNED\b|조사(?:를|는)?\s*중단/i.test(inputText) || clauses.some(c => /\bNOT_PLANNED\b|조사(?:를|는)?\s*중단/i.test(c));
-  const pendingInSource = clauses.some(c => pendingIntegrationOrVerificationPattern.test(c));
-  const claimsIntegrationCompletion =
-    integrationCompletionClaimPattern.test(inputText) ||
+  const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
+  const hasIntegrationReviewWait =
     (context.previousKind === "review" && integrationReviewContextPattern.test(context.previousText ?? "")) ||
-    (context.hasActiveAgentNote && /완료|통합|종결|종료|반영|통과/.test(inputText));
-  if (!mentionsNotPlanned && !pendingInSource && !claimsIntegrationCompletion) return null;
+    (context.hasActiveAgentNote && context.activeNoteKind === "review");
+  const requiresReceipt = !!input.receipt || hasIntegrationReviewWait || context.hasActiveAgentNote || claimsCompletion;
+  if (!requiresReceipt) return null;
+
   if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
   }
 
-  const structuralRefs = extractRepoIssueRefs(stripReferenceMentions(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`));
-  const proseAnchorRefs = extractRepoIssueRefs(stripReferenceMentions(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`));
-  const inputRefs = extractRepoIssueRefs(stripReferenceMentions(inputText));
-  const anchoredRepos = structuralRefs.repos.size > 0 ? structuralRefs.repos : proseAnchorRefs.repos;
-  const expectedRepo = context.expectedRepo ?? (anchoredRepos.size === 1 ? [...anchoredRepos][0] : undefined);
-
-  let targetIssues = structuralRefs.issues.size > 0 ? structuralRefs.issues : proseAnchorRefs.issues;
-  if (targetIssues.size > 0 && inputRefs.issues.size > 0 && [...inputRefs.issues].some(id => !targetIssues.has(id))) {
-    return "분류 입력의 이슈 번호가 대상 세션의 이슈와 일치하지 않아 idle로 분류할 수 없습니다. 대상 저장소와 이슈 번호를 확인하세요.";
-  }
-  if (targetIssues.size === 0) {
-    targetIssues = inputRefs.issues;
-  }
-  if (targetIssues.size === 0) {
-    const nonClosureText = clauses
-      .filter(c => extractClosureClaims([c], completedClosureMatchPattern).length === 0 && extractClosureClaims([c], notPlannedClosureMatchPattern).length === 0)
-      .join(" ");
-    targetIssues = extractRepoIssueRefs(stripReferenceMentions(nonClosureText)).issues;
+  const receipt = input.receipt;
+  if (!receipt) {
+    return "완료 영수증·검증 근거(receipt: completed 또는 not_planned)가 없어 검증 대기를 idle로 내릴 수 없습니다. 통합 커밋·검증 결과·대상 저장소와 이슈의 GitHub 종료 사유를 확인해 구조화된 receipt로 분류하세요.";
   }
 
-  if (mentionsNotPlanned) {
-    const hasProblem = clauses.some(
-      c => openOrProposalPattern.test(c) || negatedOutcomePattern.test(c) || pendingClosureOrCheckPattern.test(c) || /[?？]/.test(c),
-    );
-    const notPlannedClaims = extractClosureClaims(clauses, notPlannedClosureMatchPattern);
-    const hasConfirmed = closureCoversTargets(notPlannedClaims, targetIssues, last.text, expectedRepo);
-    if (hasProblem || !hasConfirmed) {
-      return "NOT_PLANNED 종료가 확정되지 않았거나 대상 저장소·이슈와 일치하지 않거나 열린(OPEN)·제안·미확인 상태여서 idle로 분류할 수 없습니다. 대상 이슈의 실제 GitHub NOT_PLANNED 종료를 확인하세요.";
+  if (receipt.kind === "withdrawn") {
+    if (hasIntegrationReviewWait || claimsCompletion) {
+      return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
-    if (!/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(inputText)) {
+    return null;
+  }
+
+  if (!context.expectedRepo) {
+    return "대상 프로젝트의 GitHub 저장소(owner/repo)를 확인할 수 없어 완료 영수증을 검증할 수 없습니다.";
+  }
+  if (receipt.repo.toLowerCase() !== context.expectedRepo.toLowerCase()) {
+    return `영수증 저장소(${receipt.repo})가 대상 프로젝트 저장소(${context.expectedRepo})와 일치하지 않아 idle로 분류할 수 없습니다.`;
+  }
+
+  const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
+  const anchoredIssues = structuralIssues.size > 0
+    ? structuralIssues
+    : extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
+  if (anchoredIssues.size > 0 && !anchoredIssues.has(receipt.issue)) {
+    return `영수증 이슈(#${receipt.issue})가 대상 세션의 이슈(${[...anchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
+  }
+
+  const issueOutcome = await verifier.verifyIssue(receipt.repo, receipt.issue);
+  if (receipt.kind === "not_planned") {
+    if (issueOutcome.state !== "CLOSED" || issueOutcome.stateReason !== "NOT_PLANNED") {
+      return `대상 이슈(${receipt.repo}#${receipt.issue})의 GitHub NOT_PLANNED 종료가 확인되지 않아 idle로 분류할 수 없습니다(현재 상태: ${issueOutcome.state}/${issueOutcome.stateReason}).`;
+    }
+    if (!/\bNOT_PLANNED\b|조사\s*중단|중단/i.test(input.text)) {
       return "NOT_PLANNED 조사 중단 건은 해결 완료와 구분해 중단 사유(NOT_PLANNED)를 명시해 분류하세요.";
     }
     return null;
   }
-  const hasNegatedProductOutcome = clauses.some(
-    c => negatedOutcomePattern.test(c) || openOrProposalPattern.test(c) || pendingClosureOrCheckPattern.test(c),
-  );
-  const hasMainCommit = clauses.some(c => commitShaPattern.test(c) && mainIntegrationTargetPattern.test(c) && !negatedOutcomePattern.test(c));
-  const hasVerification = clauses.some(
-    c => verificationReceiptPattern.test(c) && !negatedOutcomePattern.test(c) && !pendingClosureOrCheckPattern.test(c),
-  );
-  const completedClaims = extractClosureClaims(clauses, completedClosureMatchPattern);
-  const hasClosure = closureCoversTargets(completedClaims, targetIssues, last.text, expectedRepo);
-  if (pendingInSource || hasNegatedProductOutcome || !hasMainCommit || !hasVerification || !hasClosure) {
-    return "완료 영수증·검증 근거(main 통합 커밋·검증 통과·대상 저장소·이슈의 GitHub COMPLETED 종료) 또는 확정된 NOT_PLANNED 종료 근거가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다. 최신 검증·커밋·대상 이슈의 GitHub 종료 사유를 확인한 뒤 다시 분류하세요.";
+
+  if (issueOutcome.state !== "CLOSED" || issueOutcome.stateReason !== "COMPLETED") {
+    return `대상 이슈(${receipt.repo}#${receipt.issue})의 GitHub COMPLETED 종료가 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다(현재 상태: ${issueOutcome.state}/${issueOutcome.stateReason}).`;
+  }
+
+  const commitOutcome = await verifier.verifyMainCommit(context.workspacePath, receipt.repo, receipt.commit);
+  if (!commitOutcome.onMain) {
+    return `통합 커밋(${receipt.commit})이 대상 저장소(${receipt.repo})의 main 브랜치에 반영된 것을 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (!sameCommitRef(receipt.commit, receipt.verifiedCommit, commitOutcome.resolvedSha)) {
+    return `검증 커밋(${receipt.verifiedCommit})이 통합 커밋(${receipt.commit})과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (commitOutcome.checks === "failed" || commitOutcome.checks === "pending") {
+    return `통합 커밋(${receipt.commit})의 검증 상태가 ${commitOutcome.checks}여서 검증 대기를 idle로 내릴 수 없습니다.`;
+  }
+  if (receipt.verification.source === "ci" && commitOutcome.checks !== "passed") {
+    return `통합 커밋(${receipt.commit})의 통과된 CI 체크를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다(현재 상태: ${commitOutcome.checks}).`;
   }
   return null;
 }
@@ -225,7 +139,14 @@ export async function managedRowsForCoordinator(paseo: PluginHandlerContext["pas
   return managed;
 }
 
-export function attachCoordinatorTools(server: PluginServerContext, prefs: PreferenceStore, reader: ConversationReader, additionalTools: AgentToolDefinition[] = [], notes?: NoteStore) {
+export function attachCoordinatorTools(
+  server: PluginServerContext,
+  prefs: PreferenceStore,
+  reader: ConversationReader,
+  additionalTools: AgentToolDefinition[] = [],
+  notes?: NoteStore,
+  verifier: OutcomeVerifier = createOutcomeVerifier(),
+) {
   const targetInput = z.object({ sessionId: z.string().optional() });
   const read = defineAgentTool({
     name: "read_board_conversation",
@@ -243,28 +164,30 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
         const current = prefs.read();
         const visibleNotes = notes ? notes.visible(new Set(rows.map(r => r.id))) : {};
         for (const r of rows) {
-          if (!isCurrentMembership(r,current)) continue;
+          if (!isCurrentMembership(r, current)) continue;
           const j = current.judgments[r.id];
           const matchedJudgment = j?.projectId === r.projectId ? j : undefined;
           const incomplete = matchedJudgment?.kind === "question" && !matchedJudgment.content?.recommendation && !matchedJudgment.content?.needsInput;
           let needsRecommendation = false;
           if (incomplete && r.status === "idle" && !r.nativePending) {
-            const evidence = await reader.read(paseo,r).catch(() => null);
+            const evidence = await reader.read(paseo, r).catch(() => null);
             needsRecommendation = matchedJudgment.evidenceId === evidence?.id;
           }
           const activeNote = visibleNotes[r.id];
           const noteSuperseded = isSupersededAgentNote(r, activeNote, current);
-          listing.push({ id:r.id, projectId:r.projectId, sourceProjectId:r.sourceProjectId, project:r.projectTitle,
-            ...(r.workspaceId ? {workspaceId:r.workspaceId} : {}), workspaceTitle:r.workspaceTitle, title:r.title,
-            status:r.status, activityAt:r.activityAt,
-            ...(matchedJudgment ? {judgment:{kind:matchedJudgment.kind, evidenceId:matchedJudgment.evidenceId}} : {}),
-            ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? {note:{kind:activeNote.kind, origin:activeNote.origin ?? "person", ...(activeNote.evidenceId ? {evidenceId:activeNote.evidenceId} : {})}} : {}),
-            ...(needsRecommendation ? {needsRecommendation:true}:{}),
-            ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? {factCandidate:true} : {}) });
+          listing.push({
+            id: r.id, projectId: r.projectId, sourceProjectId: r.sourceProjectId, project: r.projectTitle,
+            ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}), workspaceTitle: r.workspaceTitle, title: r.title,
+            status: r.status, activityAt: r.activityAt,
+            ...(matchedJudgment ? { judgment: { kind: matchedJudgment.kind, evidenceId: matchedJudgment.evidenceId } } : {}),
+            ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? { note: { kind: activeNote.kind, origin: activeNote.origin ?? "person", ...(activeNote.evidenceId ? { evidenceId: activeNote.evidenceId } : {}) } } : {}),
+            ...(needsRecommendation ? { needsRecommendation: true } : {}),
+            ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? { factCandidate: true } : {}),
+          });
         }
         const final = prefs.read();
         if (final.coordinator !== agent.id) throw new Error("코디네이터 지정이 해제되었습니다.");
-        const included = new Set(rows.filter(r => isCurrentMembership(r,final)).map(r => r.id));
+        const included = new Set(rows.filter(r => isCurrentMembership(r, final)).map(r => r.id));
         return { text: JSON.stringify(listing.filter(r => included.has(r.id))) };
       }
       const target = rows.find(r => r.id === sessionId);
@@ -277,7 +200,7 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work idle, retrieve the latest verification receipt, integration commit, and GitHub COMPLETED close reason; for investigation stops closed as NOT_PLANNED, verify the stop reason and NOT_PLANNED closure without requiring an integration commit. Never claim completion or clear a pending verification wait without verified receipts or NOT_PLANNED closure evidence. Separate product integration outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify so stale pre-integration waits do not linger. For a human question, put one concise question in content.question. Give an editable complete reply in content.recommendation and a short evidence-based recommendationReason, or specify the missing input in content.needsInput. Include selectable options (label, reply) only when supported. Older unstructured judgments remain valid. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci'|'local', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', reason} only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
@@ -291,42 +214,82 @@ export function attachCoordinatorTools(server: PluginServerContext, prefs: Prefe
       const latest = await reader.read(paseo, row, true);
       if (!latest?.turns.length || latest.id !== input.evidenceId) throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
       const currentNote = notes?.visible(new Set([row.id]))[row.id];
+      const beforeScope = prefs.read();
+      if (beforeScope.coordinator !== agent.id || !isCurrentMembership(row, beforeScope)) {
+        throw new Error("관리 범위가 바뀌었습니다.");
+      }
+      const beforePrevious = beforeScope.judgments[row.id];
+      const beforePreviousSameProject = beforePrevious?.projectId === row.projectId ? beforePrevious : undefined;
+      const beforeIsClarificationReply = !!latest.lastInputIds?.some(id => beforeScope.clarifications?.[id]);
+      const beforeActiveAgentNote =
+        currentNote?.origin === "agent" &&
+        currentNote.kind !== "clear" &&
+        !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, currentNote, beforeScope);
+
+      let verifiedExpectedRepo: string | undefined;
+      if (input.kind === "idle") {
+        const ws = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
+        const savedRepo = Object.hasOwn(beforeScope.projectRepositories, row.projectId) ? beforeScope.projectRepositories[row.projectId] : undefined;
+        verifiedExpectedRepo = savedRepo?.mode === "manual"
+          ? savedRepo.repo
+          : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(ws?.gitRuntime?.remoteUrl) ?? undefined);
+        const rejection = await verifyIdleClassification(
+          latest,
+          { text: input.text, receipt: input.receipt },
+          {
+            previousKind: beforePreviousSameProject?.kind,
+            previousText: beforePreviousSameProject?.text,
+            activeNoteKind: beforeActiveAgentNote ? currentNote?.kind : undefined,
+            activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
+            sessionTitle: row.title,
+            workspaceTitle: row.workspaceTitle,
+            workspacePath: ws?.workspaceDirectory ?? undefined,
+            expectedRepo: verifiedExpectedRepo,
+            hasActiveAgentNote: !!beforeActiveAgentNote,
+            isClarificationReply: beforeIsClarificationReply,
+          },
+          verifier,
+        );
+        if (rejection) throw new Error(rejection);
+        const rowsAfter = await managedRowsForCoordinator(paseo, prefs, agent.id);
+        const rowAfter = rowsAfter.find(r => r.id === input.sessionId);
+        if (!rowAfter) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
+        if (rowAfter.nativePending) throw new Error("권한 응답 대기 중인 세션은 분류할 수 없습니다. 권한 요청을 먼저 확인해 주세요.");
+        if (rowAfter.status === "running" || rowAfter.lane === "running") {
+          throw new Error("실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요.");
+        }
+        if (rowAfter.status !== "idle") throw new Error(`대기 중인 관리 세션을 확인해 주세요(현재 상태: ${rowAfter.status ?? "unknown"}).`);
+        const latestAfter = await reader.read(paseo, rowAfter, true);
+        if (!latestAfter?.turns.length || latestAfter.id !== input.evidenceId) {
+          throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
+        }
+      }
+
       prefs.change(scope => {
         if (scope.coordinator !== agent.id || !isCurrentMembership(row, scope)) throw new Error("관리 범위가 바뀌었습니다.");
         const previous = scope.judgments[row.id];
         const previousSameProject = previous?.projectId === row.projectId ? previous : undefined;
         const isClarificationReply = !!latest.lastInputIds?.some(id => scope.clarifications?.[id]);
-        const activeAgentNote =
-          currentNote?.origin === "agent" &&
-          currentNote.kind !== "clear" &&
-          !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, currentNote, scope);
-        if (input.kind === "idle") {
-          const savedRepo = Object.hasOwn(scope.projectRepositories, row.projectId) ? scope.projectRepositories[row.projectId] : undefined;
-          const expectedRepo = savedRepo?.mode === "manual" ? savedRepo.repo : (row.workspacePull?.repo ?? row.projectRepo);
-          const rejection = unverifiedIdleReason(latest, input.text, {
-            previousKind: previousSameProject?.kind,
-            previousText: previousSameProject?.text,
-            activeNoteText: activeAgentNote ? currentNote?.text : undefined,
-            sessionTitle: row.title,
-            workspaceTitle: row.workspaceTitle,
-            expectedRepo,
-            hasActiveAgentNote: !!activeAgentNote,
-            isClarificationReply,
-          });
-          if (rejection) throw new Error(rejection);
+        const latestNote = notes?.visible(new Set([row.id]))[row.id];
+        if (input.kind === "idle" && (input.receipt?.kind === "completed" || input.receipt?.kind === "not_planned")) {
+          const currentSavedRepo = Object.hasOwn(scope.projectRepositories, row.projectId) ? scope.projectRepositories[row.projectId] : undefined;
+          const currentExpectedRepo = currentSavedRepo?.mode === "manual" ? currentSavedRepo.repo : verifiedExpectedRepo;
+          if (!currentExpectedRepo || input.receipt.repo.toLowerCase() !== currentExpectedRepo.toLowerCase()) {
+            throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+          }
         }
         if (
           input.kind === "idle" &&
           !isClarificationReply &&
-          currentNote?.origin === "agent" &&
-          currentNote.kind !== "clear" &&
-          currentNote.evidenceId &&
-          currentNote.evidenceId !== input.evidenceId
+          latestNote?.origin === "agent" &&
+          latestNote.kind !== "clear" &&
+          latestNote.evidenceId &&
+          latestNote.evidenceId !== input.evidenceId
         ) {
           scope.supersededAgentNotes[row.id] = {
             projectId: row.projectId,
-            revision: currentNote.revision,
-            evidenceId: currentNote.evidenceId,
+            revision: latestNote.revision,
+            evidenceId: latestNote.evidenceId,
           };
         }
         const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
