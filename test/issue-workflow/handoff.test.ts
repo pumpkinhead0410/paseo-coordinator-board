@@ -250,6 +250,64 @@ test("review carries the stage-two question through the board snapshot and reply
   });
 });
 
+test.each(["single question", "older question carried"])("progress updates preserve the current decision and reply: %s", async scenario => {
+  const f = await openIssueBoard();
+  const sessionId = "w305";
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
+  const card = async () => projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  let older: {evidenceId: string; version: string} | undefined;
+  if (scenario === "older question carried") {
+    const {evidenceId} = await read();
+    await classify({evidenceId, kind: "question", text: "원문 보존 기간을 알려 주세요."});
+    older = {evidenceId, version: (await card())!.session.decision!.version};
+    append("표지 이미지 경로를 알려 주세요.");
+  }
+  const {evidenceId} = await read();
+  const content = older
+    ? {question: "표지 이미지 경로를 알려 주세요.", needsInput: "표지 이미지 파일 경로"}
+    : {question: "공식 안전문과 저작권 규칙을 알려 주세요.", needsInput: "공식 안전문 원문과 회사 저작권 규칙"};
+  await classify({evidenceId, kind: "question", text: content.question, content});
+  const version = (await card())!.session.decision!.version;
+
+  append("1단계 검증 자료를 정리했습니다.");
+  const progress = await read();
+  expect(progress.evidenceId).not.toBe(evidenceId);
+  expect((await card())?.session).toMatchObject({evidenceId: progress.evidenceId,
+    decision: {...content, evidenceId, version, source: "coordinator"}});
+
+  append(content.question);
+  expect((await card())?.session.decision).toMatchObject({...content, version, source: "coordinator"});
+  append("어느 표기 형식을 선택하시겠어요?");
+  expect((await card())?.session.decision).toMatchObject({source: "conversation", question: "어느 표기 형식을 선택하시겠어요?"});
+  append("1단계 검증 메모를 저장했습니다.");
+
+  const answer = {projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
+    text: "첨부한 자료를 사용하세요.", requestKey: "reply-after-progress", version};
+  const worker = f.agents.find(a => a.id === sessionId)!;
+  worker.pendingPermissions.push({id: "fixture-permission"});
+  expect((await card())?.session.decision).toMatchObject({source: "permission"});
+  await expect(board.reply(answer)).rejects.toThrow(/보낼 수 없습니다/);
+  worker.pendingPermissions.length = 0;
+
+  if (older) await expect(board.reply({...answer, version: older.version})).rejects.toThrow(/바뀌었습니다/);
+  await expect(board.reply(answer)).resolves.toMatchObject({recipientId: sessionId});
+  expect(f.sent).toHaveLength(1);
+  expect(JSON.parse(f.sent[0].text.split("\n")[1])).toMatchObject({evidenceId, revision: version,
+    recipientSessionId: sessionId, questions: [{id: version, text: content.question}]});
+  expect(await card()).toBeUndefined();
+
+  append({role: "user", text: older ? "표지는 cover.png이고 원문은 14일간 보존하세요." : "첨부 원문과 회사명 표기 규칙을 사용하세요."},
+    "요청한 자료를 확인했습니다.");
+  const resolved = await read();
+  const replyId = resolved.userReplies.at(-1).replyId;
+  const questionAnswer = [{questionEvidenceId: evidenceId, replyId}];
+  if (older) questionAnswer.push({questionEvidenceId: older.evidenceId, replyId});
+  await classify({evidenceId: resolved.evidenceId, kind: "idle", text: "남은 결정 없음", questionAnswer});
+  expect(await card()).toBeUndefined();
+  expect(f.prefs.read().judgments[sessionId]).toMatchObject({kind: "idle", evidenceId: resolved.evidenceId});
+});
+
 test("same excerpt permits supplementing needsInput while rejecting a replacement question", async () => {
   const f = await openIssueBoard();
   const {read, classify} = sessionTools(f, "w305");

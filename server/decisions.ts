@@ -58,9 +58,16 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
   const dismissed = row.evidenceId && row.evidenceId === activeNote?.evidenceId && activeNote.origin === "person" && activeNote.kind !== "question";
   const judgment = prefs.judgments[row.id];
   const matched = judgment?.projectId === row.projectId ? judgment : undefined;
-  const structured = matched?.kind === "question" && matched.evidenceId === row.evidenceId ? matched : undefined;
+  const currentQuestion = matched?.kind === "question" ? matched : undefined;
+  const structured = currentQuestion?.evidenceId === row.evidenceId ? currentQuestion : undefined;
   const pending = matched?.openQuestions ?? (matched?.openQuestion ? [matched.openQuestion] : []);
-  const carried = structured ? undefined : pending.at(-1);
+  // A progress update leaves the current question open ahead of older questions.
+  let carried = currentQuestion ? undefined : pending.at(-1);
+  if (currentQuestion && !structured) {
+    const question = currentQuestion.content?.question ?? currentQuestion.text;
+    const repeated = evidence && lastConversationQuestion(evidence, row.id === prefs.coordinator)?.question === question;
+    if (row.lane !== "human" || repeated) carried = { ...currentQuestion, question };
+  }
   let content: Omit<Decision, "version">;
   let questionEvidenceId: string | undefined;
   if (row.nativePending) {
