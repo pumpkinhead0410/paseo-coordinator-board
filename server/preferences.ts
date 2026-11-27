@@ -105,6 +105,7 @@ const storedJudgment = z.object({
 const coordinatorConfig = z.object({ provider: z.string(), thinkingOptionId: z.string().optional(), modeId: z.string().optional() });
 const schema = z.object({
   projects: z.array(z.string()), coordinator: z.string().nullable(),
+  quotaReceipts: z.record(z.string(), z.string()).default({}),
   workerModeOverrides: z.record(workerModeProvider, z.string().min(1).max(256)).default({}),
   pullMergeHistory: z.record(z.string(), pullMergeActivity.extend({
     notificationCoordinator: z.string().nullable().optional(),
