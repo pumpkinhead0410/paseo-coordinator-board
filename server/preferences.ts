@@ -95,7 +95,8 @@ const storedJudgment = z.object({
   verificationTarget: verificationTargetSchema.optional(),
   questionUserInputId: z.string().max(64).optional(), // Legacy records
   questionCursor: z.string().max(64).optional(),
-  openQuestion: openQuestionStateSchema.optional(),
+  openQuestion: openQuestionStateSchema.optional(), // Legacy single-question record
+  openQuestions: z.array(openQuestionStateSchema).optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });
 const coordinatorConfig = z.object({ provider: z.string(), thinkingOptionId: z.string().optional(), modeId: z.string().optional() });

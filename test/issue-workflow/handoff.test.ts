@@ -227,10 +227,13 @@ test("general answers clear only the cited question, including when two sources 
   const note = {activeNoteKind:"question" as const, activeNoteEvidenceId:"opened", activeNoteCursor:"epoch:2",
     activeNoteRevision:1, activeNoteText:"보존 기간을 알려 주세요.", hasActiveAgentNote:true, isClarificationReply:false};
   const answer = {questionEvidenceId:"opened", replyId, noteRevision:1};
-  const verify = (context: typeof note & {previousOpenQuestion?: {evidenceId:string; cursor:string; text:string}}) =>
+  const verify = (context: typeof note & {previousOpenQuestions?: {evidenceId:string; cursor:string; text:string}[]}) =>
     verifyIdleClassification(evidence, {text:"자료 확인", questionAnswer:answer}, context, {} as OutcomeVerifier);
   expect(await verify(note)).toBeNull();
-  expect(await verify({...note, previousOpenQuestion:{evidenceId:"opened", cursor:"epoch:2", text:"원문과 저작권 규칙"}})).toMatch(/질문/);
+  const withdrawal = {...evidence, turns:[{role:"assistant" as const, text:"보존 기간 요청이 취소됐습니다."}]};
+  expect(await verifyIdleClassification(withdrawal, {text:"자료 확인", questionAnswer:{questionEvidenceId:"fake", replyId:"fake"}},
+    note, {} as OutcomeVerifier)).toMatch(/withdrawn/);
+  expect(await verify({...note, previousOpenQuestions:[{evidenceId:"opened", cursor:"epoch:2", text:"원문과 저작권 규칙"}]})).toMatch(/질문/);
 });
 
 test("plan_board_assignment exposes workspace kind, branch, path and session workspaceId for direct worktree assignment and owner reuse", async () => {
@@ -662,7 +665,7 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     kind: "review",
     text: "#305 1단계 통합 확인",
   });
-  expect(prefs.read().judgments.w305.openQuestion).toMatchObject({ evidenceId: e305.evidenceId });
+  expect(prefs.read().judgments.w305.openQuestions).toMatchObject([{ evidenceId: e305.evidenceId }]);
   await expect(run("classify_board_conversation", {
     sessionId: "w305",
     evidenceId: stage1Aside305.evidenceId,
@@ -678,6 +681,11 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
       closeReason: "COMPLETED",
     },
   })).rejects.toThrow(/사용자 입력·결정 대기|열린 질문/);
+  await run("classify_board_conversation", {
+    sessionId: "w305", evidenceId: stage1Aside305.evidenceId, kind: "question", text: "정리 폴더 보존 기간",
+    content: {question: "정리 폴더를 며칠 보존할까요?", needsInput: "보존 기간"},
+  });
+  expect(prefs.read().judgments.w305.openQuestions?.map(q => q.evidenceId)).toContain(e305.evidenceId);
   // Even on a silent assistant-only follow-up after `question -> review`, `openQuestion` STILL blocks `completed -> idle`!
   w305.updatedAt = "2026-11-26T06:36:40Z";
   timelines.get("w305")!.push("#305 305aaaa 원격 main 통합과 CI 통과를 마쳤습니다.");
