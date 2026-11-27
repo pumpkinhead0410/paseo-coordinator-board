@@ -76,7 +76,7 @@ async function openIssueBoard(options: {
     { id: "w305", title: "[인계] #305 CE/UL 안전문·저작권 2단계", workspaceId: "wks_main", status: "idle", updatedAt: "2026-11-26T06:20:00Z", pendingPermissions: [] },
   ];
 
-  const timelines = new Map<string, string[]>([
+  const timelines = new Map<string, (string | { role: "user" | "assistant"; text: string })[]>([
     ["w308", ["#308 사진 교체 버튼 H1 확인을 e9fe346에 기록했습니다. 운영 세션의 실제 통합 결과 최종검증이 남았습니다."]],
     ["w303", ["#303 라이선스 검사 일정 미정으로 조사를 중단했고 GitHub에서 NOT_PLANNED로 닫힌 것을 확인했습니다."]],
     ["w305", ["#305 1단계 통합 완료. 2단계 AC-6 진행을 위해 공식 CE/UL 안전문 원문, 표지 이미지, 회사 저작권 치환 규칙을 알려 주세요."]],
@@ -136,10 +136,12 @@ async function openIssueBoard(options: {
             options.onTimelineRefetch?.(id, timelineRefetchCount);
             return {
               epoch: "1",
-              entries: (timelines.get(id) ?? []).map((text, index) => ({
+              entries: (timelines.get(id) ?? []).map((entry, index) => ({
                 seqEnd: index + 1,
                 timestamp: agents.find(a => a.id === id)?.updatedAt,
-                item: { type: "assistant_message", text },
+                item: typeof entry === "string"
+                  ? { type: "assistant_message", text: entry }
+                  : { type: entry.role === "user" ? "user_message" : "assistant_message", text: entry.text },
               })),
             };
           },
@@ -552,6 +554,106 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     content: { needsInput: expect.stringContaining("저작권") },
   });
 
+  // Even when a new assistant-only turn mentions ONLY Stage-1 completion (without repeating the Stage-2 question), or uses "별도로 2단계 진행에는 ... 여전히 필요합니다", or tries `question -> review -> completed`, #305's unanswered Stage-2 question MUST remain open!
+  w305.updatedAt = "2026-11-26T06:36:15Z";
+  timelines.get("w305")!.push("#305 1단계 통합 커밋 305aaaa를 원격 main에 반영했고 CI 통과와 GitHub COMPLETED 종료를 확인했습니다.");
+  const stage1Silent305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1Silent305.evidenceId,
+    kind: "idle",
+    text: "#305 1단계 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 305,
+      commit: "305aaaa",
+      verifiedCommit: "305aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/열린 질문\(question\)에 대한 사용자 답변 또는 질문 철회 근거/);
+
+  w305.updatedAt = "2026-11-26T06:36:30Z";
+  timelines.get("w305")!.push("#305 1단계 통합 커밋 305aaaa 원격 main 반영 완료. 별도로 2단계 진행에는 사용자 원문과 저작권 규칙이 여전히 필요합니다.");
+  const stage1Aside305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1Aside305.evidenceId,
+    kind: "idle",
+    text: "#305 1단계 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 305,
+      commit: "305aaaa",
+      verifiedCommit: "305aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/사용자 입력·결정 대기/);
+  expect(prefs.read().judgments.w305).toMatchObject({
+    kind: "question",
+    content: { needsInput: expect.stringContaining("저작권") },
+  });
+
+  // Switching `question -> review` MUST preserve `openQuestion` so `question -> review -> completed -> idle` cannot silently drop an unanswered question either!
+  await run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1Aside305.evidenceId,
+    kind: "review",
+    text: "#305 1단계 통합 확인",
+  });
+  expect(prefs.read().judgments.w305.openQuestion).toMatchObject({ evidenceId: e305.evidenceId });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1Aside305.evidenceId,
+    kind: "idle",
+    text: "#305 1단계 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 305,
+      commit: "305aaaa",
+      verifiedCommit: "305aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/사용자 입력·결정 대기|열린 질문/);
+  // Even on a silent assistant-only follow-up after `question -> review`, `openQuestion` STILL blocks `completed -> idle`!
+  w305.updatedAt = "2026-11-26T06:36:40Z";
+  timelines.get("w305")!.push("#305 305aaaa 원격 main 통합과 CI 통과를 마쳤습니다.");
+  const stage1AfterReview305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1AfterReview305.evidenceId,
+    kind: "idle",
+    text: "#305 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 305,
+      commit: "305aaaa",
+      verifiedCommit: "305aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/열린 질문\(question\)에 대한 사용자 답변 또는 질문 철회 근거/);
+  // Restore w305 judgment back to the original open question for withdrawal checks below.
+  prefs.change(scope => {
+    scope.judgments.w305 = {
+      projectId: "easydocs",
+      evidenceId: e305.evidenceId,
+      kind: "question",
+      questionUserInputId: "",
+      text: "#305 2단계 공식 자료·저작권 규칙 대기",
+      content: {
+        question: "#305 2단계 진행을 위해 공식 CE/UL 안전문 원문, 표지 이미지, 저작권 치환 규칙을 제공해 주실 수 있나요?",
+        needsInput: "공식 CE/UL 안전문 원문·표지 이미지·회사 저작권 치환 규칙",
+      },
+    };
+  });
+
   // Checking whether the user withdrew ("철회 여부를 확인 중입니다") is also rejected fail-closed!
   w305.updatedAt = "2026-11-26T06:37:00Z";
   timelines.get("w305")!.push("사용자 요청 철회 여부를 확인 중입니다.");
@@ -907,6 +1009,7 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   })).rejects.toThrow(/세션 보고가 바뀌었습니다/);
   expect(prefs.read().supersededAgentNotes.w308).toBeUndefined();
   expect(prefs.read().judgments.w308).toBeUndefined();
+  notes.update({ sessionId: "w308", kind: "clear", text: "", expectedRevision: 1 }, "person");
 
   // 3. Session resuming (`running`) during the final workspace refresh MUST abort idle classification!
   midVerifyAction = undefined;
@@ -1101,14 +1204,17 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     verificationPending: true,
   });
 
-  // Once #308 actually lands with a verified GitHub closing commit and passing CI, `idle` succeeds and clears `verificationPending`!
+  // Once the user answers the schedule inquiry and #308 lands with a verified GitHub closing commit and passing CI (even when noting "추가 승인이 필요하지 않습니다"), `idle` succeeds and clears `verificationPending`!
   issueStates.set("acme/easydocs#308", {
     state: "CLOSED",
     stateReason: "COMPLETED",
     closing: { status: "commit", sha: "cf6f661000000000000000000000000000000000" },
   });
   w308.updatedAt = "2026-11-26T07:08:00Z";
-  timelines.get("w308")!.push("#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다.");
+  timelines.get("w308")!.push(
+    { role: "user", text: "오늘 오후 3시에 검증 진행하세요." },
+    "#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다. 추가 승인이 필요하지 않습니다.",
+  );
   const verifiedDoneEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   await run("classify_board_conversation", {
     sessionId: "w308",
@@ -1266,9 +1372,12 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     verificationPending: true,
     verificationTarget: { repo: "acme/easydocs", issues: [308] },
   });
-  // Valid `#308` receipt DOES clear `#308`'s pending verification!
+  // Once the user replies to the #999 inquiry and a valid `#308` receipt arrives, `#308`'s pending verification clears!
   wUntitled.updatedAt = "2026-11-26T07:23:00Z";
-  timelines.get("w_untitled")!.push("#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다.");
+  timelines.get("w_untitled")!.push(
+    { role: "user", text: "#999 일정 확인 완료했습니다. #308 결과로 마무리하세요." },
+    "#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다. 추가 승인이 필요하지 않습니다.",
+  );
   const untitledEv4 = JSON.parse(await run("read_board_conversation", { sessionId: "w_untitled" }));
   await run("classify_board_conversation", {
     sessionId: "w_untitled",

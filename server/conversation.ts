@@ -9,6 +9,7 @@ export type Turn = { role: "user" | "assistant"; text: string; truncated?: boole
 type ClarificationObservation = { bodyHash: string; response?: string };
 export type Evidence = {
   id: string; turns: Turn[];
+  userInputId?: string;
   replies?: Map<string, string>;
   lastInputIds?: string[];
   boardMessageHashes?: Map<string,string>;
@@ -24,6 +25,8 @@ export function excerpt(page: Page): Evidence {
   if (page.error || page.gap || page.staleCursor) throw new Error("대화 발췌를 확인할 수 없습니다.");
   const turns: Turn[] = [];
   const digest = createHash("sha256").update(page.epoch);
+  const userDigest = createHash("sha256").update(page.epoch);
+  let hasUserInput = false;
   const laterInputs: string[] = [];
   const deliveries: NonNullable<Evidence["deliveries"]> = [];
   const replies = new Map<string, string>();
@@ -55,6 +58,9 @@ export function excerpt(page: Page): Evidence {
         ? { bodyHash: createHash("sha256").update(item.text).digest("hex") } : undefined;
       if (clarification) {
         for (const id of messageIds) clarificationMessages.set(id, clarification);
+      } else if (text) {
+        hasUserInput = true;
+        userDigest.update(JSON.stringify([seqEnd, text]));
       }
     } else if (text) {
       if (clarification) clarification.response = text.slice(0, 16000);
@@ -67,6 +73,7 @@ export function excerpt(page: Page): Evidence {
   }
   if (laterInputs.length) digest.update(JSON.stringify(laterInputs));
   return { id: digest.digest("hex").slice(0, 24), turns: turns.slice(-4),
+    ...(hasUserInput ? { userInputId: userDigest.digest("hex").slice(0, 24) } : {}),
     ...(clarification && messageIds.length ? { lastInputIds: messageIds } : {}),
     ...(clarificationMessages.size ? { clarificationMessages } : {}),
     ...(boardMessageHashes.size ? {boardMessageHashes} : {}),

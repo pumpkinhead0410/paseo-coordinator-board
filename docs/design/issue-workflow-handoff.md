@@ -171,6 +171,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 27차 `82b9f85` 지적 2건 반영)**:
   1. **활성 검증 보고와 충돌하는 `review` 입력 차단**: `verificationTarget` 고정 시 세션 제목·워크스페이스와 활성 검증 보고(`agent-note` / 기존 `review`)를 분류 입력(`input.text`)보다 우선하는 권위 앵커로 두고, 분류 입력이 기존 권위 대상(예: `#308`)과 다른 이슈(`#999`)를 제시하면 fail-closed 거절합니다.
   2. **후속 단계 사용자 입력 대기(#305 2단계) 보존**: `completed`/`not_planned` 영수증 검증 전에 최신 발췌의 미해소 사용자 입력·결정 대기(`hasRemainingHumanNeed`, 별도 작업 문장 제외) 및 열린 질문과 동일 발췌 여부를 검사해, 1단계 완료 영수증으로 2단계 `question`·`needsInput`이 닫히지 않도록 fail-closed 차단했습니다.
+- **2026-11-27 (독립 의도 리뷰 28차 `14e7f65` 지적 2건 반영)**:
+  1. **열린 질문의 결정론적 해소 근거(`userInputId` / 철회 확인) 필수화 및 `review` 경유 보존(`openQuestion`)**: `server/conversation.ts`의 `Evidence`에 비-추가질문 사용자 메시지 서명 `userInputId`를 추가하고 `server/preferences.ts`·`server/coordinator.ts`에서 열린 질문(`question` 및 `review` 경유 `openQuestion`)이 새 사용자 답변(`userInputId` 변화)이나 확정된 질문 철회 없이 `completed`/`not_planned` 영수증만으로 닫히지 않도록 fail-closed 차단했습니다. 또한 `separateTaskWithdrawalPattern`이 부사 `"별도로"`를 별도 작업으로 오인하지 않도록 수정했습니다.
+  2. **부정 표현 오차단 해소**: `remainingNeedPattern`에 부정 전방탐색(`필요하지 않`, `필요 없`, `남아 있지 않`, `대기 중이 아니` 등)을 적용해 “추가 승인이 필요하지 않습니다” 같은 정상 완료 발췌가 오차단되지 않도록 수정했습니다.
 
 ## Acceptance criteria
 

@@ -6,15 +6,15 @@ import { managedSessions, isCurrentMembership } from "./session-links";
 import { discoverSessions } from "./discovery";
 import type { NoteStore } from "./notes";
 import { createOutcomeVerifier, type OutcomeVerifier } from "./outcome-verifier";
-import { isManagedCoordinator, judgment, MAX_ISSUE_NUMBER, PreferenceStore, verificationTargetSchema, type CompletionReceipt, type VerificationTarget } from "./preferences";
+import { isManagedCoordinator, judgment, MAX_ISSUE_NUMBER, openQuestionStateSchema, PreferenceStore, verificationTargetSchema, type CompletionReceipt, type OpenQuestionState, type VerificationTarget } from "./preferences";
 import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
 const verificationReviewContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:최종\s*검증|통합\s*결과|통합\s*검증|커밋\s*검증|종료\s*사유|CI\s*(?:통과|체크|검증)|(?:통합|병합|머지|구현|검증|이슈|#\d+)\s*(?:완료|반영|종료|종결|대기)|\b(?:merged|integrated|completed|not_planned|ci\s+checks?|closing\s+commit|verification\s+pending)\b)/i;
 const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
 const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
-const separateTaskWithdrawalPattern = /(?:별도(?:의)?|별개(?:의)?|다른\s*(?:작업|요청|안건|이슈)|무관한|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
-const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요|남아|남았|대기)|(?:판단|결정|확인|승인|자료|응답|규칙|원문|입력|답변)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요|남아\s*있|남았|대기\s*중|미확정|받지\s*못)|\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining)|awaiting\s+(?:user|human|input|decision|assets?))\b/i;
+const separateTaskWithdrawalPattern = /(?:별도(?:의)?\s*(?:작업|요청|안건|이슈|문서|태스크)|별개(?:의)?\s*(?:작업|요청|안건|이슈|문서|태스크)|다른\s*(?:작업|요청|안건|이슈)|무관한\s*(?:작업|요청|안건|이슈)|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
+const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요(?!\s*(?:없|하지\s*않|치\s*않))|남아(?!\s*있지\s*않)|남았|대기(?!\s*(?:없|하지\s*않|중이?\s*아니)))|(?:판단|결정|확인|승인|자료|응답|규칙|원문|입력|답변)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요(?!\s*(?:없|하지\s*않|치\s*않))|남아\s*있(?!지\s*않)|남았|대기\s*중(?!이?\s*아니)|미확정|받지\s*못)|(?<!\bnot\s+)(?<!\bno\s+longer\s+)\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining)|awaiting\s+(?:user|human|input|decision|assets?))\b/i;
 const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
 
 function hasRemainingHumanNeed(lastText: string): boolean {
@@ -27,6 +27,24 @@ function hasRemainingHumanNeed(lastText: string): boolean {
     if (separateTaskWithdrawalPattern.test(sentence)) return false;
     return remainingNeedPattern.test(sentence) || stillAskingPattern.test(sentence);
   });
+}
+
+function isOpenQuestionResolved(
+  latest: Evidence,
+  lastText: string,
+  openQuestionUserInputId: string | undefined,
+  anchoredIssues: Set<number>,
+  openQuestionText: string,
+): boolean {
+  if (hasRemainingHumanNeed(lastText)) return false;
+  let hasNewUserReply = false;
+  if (openQuestionUserInputId !== undefined) {
+    hasNewUserReply = !!latest.userInputId && latest.userInputId !== openQuestionUserInputId;
+  } else {
+    const prevTurn = latest.turns.length >= 2 ? latest.turns[latest.turns.length - 2] : undefined;
+    hasNewUserReply = prevTurn?.role === "user" && !prevTurn.text.startsWith("[Coordinator Board · 추가 질문]");
+  }
+  return hasNewUserReply || hasConfirmedWithdrawalForTarget(lastText, anchoredIssues, openQuestionText);
 }
 
 const genericTopicStopwords = new Set([
@@ -210,6 +228,8 @@ export async function verifyIdleClassification(
     previousReviewKind?: "general" | "verification";
     previousVerificationPending?: boolean;
     previousVerificationTarget?: VerificationTarget;
+    previousQuestionUserInputId?: string;
+    previousOpenQuestion?: OpenQuestionState;
     previousEvidenceId?: string;
     previousText?: string;
     previousQuestion?: string;
@@ -255,7 +275,9 @@ export async function verifyIdleClassification(
     hasAnchoredIssue,
   });
   const hasOpenQuestion =
-    context.previousKind === "question" || (context.hasActiveAgentNote && context.activeNoteKind === "question");
+    context.previousKind === "question" ||
+    !!context.previousOpenQuestion ||
+    (context.hasActiveAgentNote && context.activeNoteKind === "question");
   const requiresReceipt = !!input.receipt || hasVerificationWait || claimsCompletion;
 
   const openQuestionText = [
@@ -263,17 +285,21 @@ export async function verifyIdleClassification(
     context.previousKind === "question" ? context.previousText ?? "" : "",
     context.previousKind === "question" ? context.previousQuestion ?? "" : "",
     context.previousKind === "question" ? context.previousNeedsInput ?? "" : "",
+    context.previousOpenQuestion?.text ?? "",
   ].join(" ");
+  const priorQuestionEvidenceId = context.activeNoteKind === "question"
+    ? context.activeNoteEvidenceId
+    : context.previousKind === "question"
+      ? context.previousEvidenceId
+      : context.previousOpenQuestion?.evidenceId;
+  const openQuestionUserInputId = context.previousKind === "question"
+    ? context.previousQuestionUserInputId
+    : context.previousOpenQuestion?.userInputId;
 
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
       return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
     }
-    const priorQuestionEvidenceId = context.activeNoteKind === "question"
-      ? context.activeNoteEvidenceId
-      : context.previousKind === "question"
-        ? context.previousEvidenceId
-        : undefined;
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
     }
@@ -326,20 +352,6 @@ export async function verifyIdleClassification(
     return null;
   }
 
-  if (hasRemainingHumanNeed(last.text)) {
-    return "최신 발췌에 아직 해소되지 않은 사용자 입력·결정 대기(후속 단계 질문)가 남아 있어 완료 영수증으로 idle 전환할 수 없습니다. 열린 질문(question)과 needsInput을 유지하세요.";
-  }
-  if (hasOpenQuestion) {
-    const priorQuestionEvidenceId = context.activeNoteKind === "question"
-      ? context.activeNoteEvidenceId
-      : context.previousKind === "question"
-        ? context.previousEvidenceId
-        : undefined;
-    if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
-      return "열린 질문과 같은 발췌에서는 완료 영수증으로 idle 전환할 수 없습니다. 질문 해소 이후 최신 발췌를 확인하세요.";
-    }
-  }
-
   if (!context.expectedRepo) {
     return "대상 프로젝트의 GitHub 저장소(owner/repo)를 확인할 수 없어 완료 영수증을 검증할 수 없습니다.";
   }
@@ -363,6 +375,18 @@ export async function verifyIdleClassification(
   if (!effectiveAnchoredIssues.has(receipt.issue)) {
     const label = hasPinnedVerificationTarget ? "미해결 검증 대기의 대상 이슈" : "대상 세션의 이슈";
     return `영수증 이슈(#${receipt.issue})가 ${label}(${[...effectiveAnchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
+  }
+
+  if (hasRemainingHumanNeed(last.text)) {
+    return "최신 발췌에 아직 해소되지 않은 사용자 입력·결정 대기(후속 단계 질문)가 남아 있어 완료 영수증으로 idle 전환할 수 없습니다. 열린 질문(question)과 needsInput을 유지하세요.";
+  }
+  if (hasOpenQuestion) {
+    if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
+      return "열린 질문과 같은 발췌에서는 완료 영수증으로 idle 전환할 수 없습니다. 질문 해소 이후 최신 발췌를 확인하세요.";
+    }
+    if (!isOpenQuestionResolved(latest, last.text, openQuestionUserInputId, anchoredIssues, openQuestionText)) {
+      return "열린 질문(question)에 대한 사용자 답변 또는 질문 철회 근거가 확인되지 않아 완료 영수증만으로 idle 전환할 수 없습니다. 열린 질문과 needsInput을 유지하세요.";
+    }
   }
 
   const issueOutcome = await verifier.verifyIssue(receipt.repo, receipt.issue);
@@ -529,6 +553,8 @@ export function attachCoordinatorTools(
       const beforeJudgmentReviewKind = beforePreviousSameProject?.reviewKind;
       const beforeJudgmentVerificationPending = !!beforePreviousSameProject?.verificationPending;
       const beforeJudgmentVerificationTarget = beforePreviousSameProject?.verificationTarget;
+      const beforeJudgmentQuestionUserInputId = beforePreviousSameProject?.questionUserInputId;
+      const beforeJudgmentOpenQuestion = beforePreviousSameProject?.openQuestion;
 
       const needsWorkspaceRefresh =
         !!row.workspaceId &&
@@ -556,6 +582,8 @@ export function attachCoordinatorTools(
             previousReviewKind: beforePreviousSameProject?.reviewKind,
             previousVerificationPending: beforePreviousSameProject?.verificationPending,
             previousVerificationTarget: beforePreviousSameProject?.verificationTarget,
+            previousQuestionUserInputId: beforePreviousSameProject?.questionUserInputId,
+            previousOpenQuestion: beforePreviousSameProject?.openQuestion,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
             previousQuestion: beforePreviousSameProject?.content?.question,
@@ -650,7 +678,9 @@ export function attachCoordinatorTools(
             previousSameProject?.kind !== beforeJudgmentKind ||
             previousSameProject?.reviewKind !== beforeJudgmentReviewKind ||
             !!previousSameProject?.verificationPending !== beforeJudgmentVerificationPending ||
-            JSON.stringify(previousSameProject?.verificationTarget ?? null) !== JSON.stringify(beforeJudgmentVerificationTarget ?? null)
+            JSON.stringify(previousSameProject?.verificationTarget ?? null) !== JSON.stringify(beforeJudgmentVerificationTarget ?? null) ||
+            previousSameProject?.questionUserInputId !== beforeJudgmentQuestionUserInputId ||
+            JSON.stringify(previousSameProject?.openQuestion ?? null) !== JSON.stringify(beforeJudgmentOpenQuestion ?? null)
           ) {
             throw new Error("분류 검증 중 기존 판단이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
           }
@@ -757,12 +787,48 @@ export function attachCoordinatorTools(
           };
         }
         const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
+        let nextQuestionUserInputId: string | undefined;
+        let nextOpenQuestion: OpenQuestionState | undefined;
+        if (input.kind === "question") {
+          nextQuestionUserInputId = previousQuestion
+            ? (previousSameProject.questionUserInputId ?? latest.userInputId ?? "")
+            : (latest.userInputId ?? "");
+        } else if (input.kind === "review" || (input.kind === "idle" && isClarificationReply)) {
+          const priorOpenQuestion: OpenQuestionState | undefined = previousSameProject?.openQuestion
+            ?? (previousSameProject?.kind === "question"
+              ? {
+                  evidenceId: previousSameProject.evidenceId,
+                  userInputId: previousSameProject.questionUserInputId ?? "",
+                  text: [
+                    previousSameProject.text,
+                    previousSameProject.content?.question ?? "",
+                    previousSameProject.content?.needsInput ?? "",
+                  ].filter(Boolean).join(" ").slice(0, 2400),
+                }
+              : undefined);
+          if (priorOpenQuestion) {
+            const lastTurn = latest.turns.at(-1);
+            const resolved =
+              input.kind === "review" &&
+              !latest.laterInput &&
+              !!lastTurn &&
+              lastTurn.role === "assistant" &&
+              !lastTurn.truncated &&
+              priorOpenQuestion.evidenceId !== latest.id &&
+              isOpenQuestionResolved(latest, lastTurn.text, priorOpenQuestion.userInputId, liveAnchoredIssues, priorOpenQuestion.text);
+            if (!resolved) {
+              nextOpenQuestion = openQuestionStateSchema.parse(priorOpenQuestion);
+            }
+          }
+        }
         const parsedJudgment = judgment.parse(input);
         scope.judgments[row.id] = {
           ...parsedJudgment,
           ...(resolvedReviewKind ? { reviewKind: resolvedReviewKind } : {}),
           ...(nextVerificationPending ? { verificationPending: true } : {}),
           ...(nextVerificationTarget ? { verificationTarget: nextVerificationTarget } : {}),
+          ...(nextQuestionUserInputId !== undefined ? { questionUserInputId: nextQuestionUserInputId } : {}),
+          ...(nextOpenQuestion ? { openQuestion: nextOpenQuestion } : {}),
           projectId: row.projectId,
           ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),
         };
