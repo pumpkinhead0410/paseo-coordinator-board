@@ -76,7 +76,8 @@ export const verificationTargetSchema = z.object({
 export type VerificationTarget = z.infer<typeof verificationTargetSchema>;
 export const openQuestionStateSchema = z.object({
   evidenceId: z.string().min(1).max(64),
-  userInputId: z.string().max(64),
+  userInputId: z.string().max(64).optional(), // Legacy records
+  cursor: z.string().max(64).optional(),
   text: z.string().max(2400),
 });
 export type OpenQuestionState = z.infer<typeof openQuestionStateSchema>;
@@ -92,7 +93,8 @@ const storedJudgment = z.object({
   reviewKind: reviewKindSchema.optional(),
   verificationPending: z.boolean().optional(),
   verificationTarget: verificationTargetSchema.optional(),
-  questionUserInputId: z.string().max(64).optional(),
+  questionUserInputId: z.string().max(64).optional(), // Legacy records
+  questionCursor: z.string().max(64).optional(),
   openQuestion: openQuestionStateSchema.optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });

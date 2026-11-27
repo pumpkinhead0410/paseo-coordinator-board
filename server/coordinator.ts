@@ -29,22 +29,29 @@ function hasRemainingHumanNeed(lastText: string): boolean {
   });
 }
 
+const questionAnswerSchema = z.object({questionEvidenceId: z.string().min(1), replyId: z.string().min(1)});
+type QuestionAnswer = z.infer<typeof questionAnswerSchema>;
+
 function isOpenQuestionResolved(
   latest: Evidence,
   lastText: string,
-  openQuestionUserInputId: string | undefined,
+  cursor: string | undefined,
   anchoredIssues: Set<number>,
   openQuestionText: string,
+  evidenceId: string | undefined,
+  answer?: QuestionAnswer,
 ): boolean {
   if (hasRemainingHumanNeed(lastText)) return false;
-  let hasNewUserReply = false;
-  if (openQuestionUserInputId !== undefined) {
-    hasNewUserReply = !!latest.userInputId && latest.userInputId !== openQuestionUserInputId;
-  } else {
-    const prevTurn = latest.turns.length >= 2 ? latest.turns[latest.turns.length - 2] : undefined;
-    hasNewUserReply = prevTurn?.role === "user" && !prevTurn.text.startsWith("[Coordinator Board · 추가 질문]");
-  }
-  return hasNewUserReply || hasConfirmedWithdrawalForTarget(lastText, anchoredIssues, openQuestionText);
+  if (hasConfirmedWithdrawalForTarget(lastText, anchoredIssues, openQuestionText)) return true;
+  if (!answer || !evidenceId || answer.questionEvidenceId !== evidenceId) return false;
+  // Older reports have no saved cursor. Recover only an exact visible evidence boundary.
+  cursor ??= latest.evidencePositions?.get(evidenceId);
+  if (!cursor) return false;
+  const reply = latest.userReplies?.find(turn => turn.replyId === answer.replyId);
+  if (!reply || reply.truncated) return false;
+  const [epoch, seq] = cursor.split(":");
+  const [replyEpoch, replySeq] = answer.replyId.split(":");
+  return epoch === replyEpoch && Number(replySeq) > Number(seq);
 }
 
 const genericTopicStopwords = new Set([
@@ -222,13 +229,13 @@ function hasPriorVerificationWait(context: {
 
 export async function verifyIdleClassification(
   latest: Evidence,
-  input: { text: string; receipt?: CompletionReceipt },
+  input: { text: string; receipt?: CompletionReceipt; questionAnswer?: QuestionAnswer },
   context: {
     previousKind?: "question" | "review" | "idle";
     previousReviewKind?: "general" | "verification";
     previousVerificationPending?: boolean;
     previousVerificationTarget?: VerificationTarget;
-    previousQuestionUserInputId?: string;
+    previousQuestionCursor?: string;
     previousOpenQuestion?: OpenQuestionState;
     previousEvidenceId?: string;
     previousText?: string;
@@ -236,6 +243,7 @@ export async function verifyIdleClassification(
     previousNeedsInput?: string;
     activeNoteKind?: "question" | "review" | "done" | "clear";
     activeNoteEvidenceId?: string;
+    activeNoteCursor?: string;
     activeNoteRevision?: number;
     activeNoteText?: string;
     sessionTitle?: string;
@@ -292,9 +300,9 @@ export async function verifyIdleClassification(
     : context.previousKind === "question"
       ? context.previousEvidenceId
       : context.previousOpenQuestion?.evidenceId;
-  const openQuestionUserInputId = context.previousKind === "question"
-    ? context.previousQuestionUserInputId
-    : context.previousOpenQuestion?.userInputId;
+  const openQuestionCursor = context.activeNoteKind === "question" ? context.activeNoteCursor : context.previousKind === "question"
+    ? context.previousQuestionCursor
+    : context.previousOpenQuestion?.cursor;
 
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
@@ -384,7 +392,7 @@ export async function verifyIdleClassification(
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 완료 영수증으로 idle 전환할 수 없습니다. 질문 해소 이후 최신 발췌를 확인하세요.";
     }
-    if (!isOpenQuestionResolved(latest, last.text, openQuestionUserInputId, anchoredIssues, openQuestionText)) {
+    if (!isOpenQuestionResolved(latest, last.text, openQuestionCursor, anchoredIssues, openQuestionText, priorQuestionEvidenceId, input.questionAnswer)) {
       return "열린 질문(question)에 대한 사용자 답변 또는 질문 철회 근거가 확인되지 않아 완료 영수증만으로 idle 전환할 수 없습니다. 열린 질문과 needsInput을 유지하세요.";
     }
   }
@@ -493,6 +501,7 @@ export function attachCoordinatorTools(
               judgment: {
                 kind: matchedJudgment.kind,
                 evidenceId: matchedJudgment.evidenceId,
+                ...(matchedJudgment.openQuestion ? {openQuestion: matchedJudgment.openQuestion} : {}),
                 ...(matchedJudgment.reviewKind ? { reviewKind: matchedJudgment.reviewKind } : {}),
                 ...(matchedJudgment.verificationPending ? { verificationPending: true } : {}),
                 ...(matchedJudgment.verificationTarget ? { verificationTarget: matchedJudgment.verificationTarget } : {}),
@@ -513,13 +522,13 @@ export function attachCoordinatorTools(
       const data = await reader.read(paseo, target, true);
       const scope = prefs.read();
       if (scope.coordinator !== agent.id || !isCurrentMembership(target, scope)) throw new Error("관리 범위가 바뀌었습니다.");
-      return { text: JSON.stringify(data ? { sessionId, evidenceId: data.id, turns: data.turns } : { sessionId, status: target.status, turns: [] }) };
+      return { text: JSON.stringify(data ? { sessionId, evidenceId: data.id, turns: data.turns, userReplies: data.userReplies } : { sessionId, status: target.status, turns: [] }) };
     },
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
-    input: judgment.extend({ sessionId: z.string() }),
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. When a user reply resolves an open question, compare its content with all requested inputs and cite questionAnswer:{questionEvidenceId,replyId} from the open question and observed userReplies. Keep partial answers and unrelated requests open. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    input: judgment.extend({ sessionId: z.string(), questionAnswer: questionAnswerSchema.optional() }),
     async execute(input, { paseo, agent }) {
       if (input.kind !== "review" && input.reviewKind !== undefined) {
         throw new Error("reviewKind는 kind: 'review'일 때만 지정할 수 있습니다.");
@@ -553,7 +562,7 @@ export function attachCoordinatorTools(
       const beforeJudgmentReviewKind = beforePreviousSameProject?.reviewKind;
       const beforeJudgmentVerificationPending = !!beforePreviousSameProject?.verificationPending;
       const beforeJudgmentVerificationTarget = beforePreviousSameProject?.verificationTarget;
-      const beforeJudgmentQuestionUserInputId = beforePreviousSameProject?.questionUserInputId;
+      const beforeJudgmentQuestionCursor = beforePreviousSameProject?.questionCursor;
       const beforeJudgmentOpenQuestion = beforePreviousSameProject?.openQuestion;
 
       const needsWorkspaceRefresh =
@@ -576,13 +585,13 @@ export function attachCoordinatorTools(
           : (row.workspacePull?.repo ?? row.projectRepo ?? githubRepository(wsBefore?.gitRuntime?.remoteUrl) ?? undefined);
         const rejection = await verifyIdleClassification(
           latest,
-          { text: input.text, receipt: input.receipt },
+          input,
           {
             previousKind: beforePreviousSameProject?.kind,
             previousReviewKind: beforePreviousSameProject?.reviewKind,
             previousVerificationPending: beforePreviousSameProject?.verificationPending,
             previousVerificationTarget: beforePreviousSameProject?.verificationTarget,
-            previousQuestionUserInputId: beforePreviousSameProject?.questionUserInputId,
+            previousQuestionCursor: beforePreviousSameProject?.questionCursor,
             previousOpenQuestion: beforePreviousSameProject?.openQuestion,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
@@ -590,6 +599,7 @@ export function attachCoordinatorTools(
             previousNeedsInput: beforePreviousSameProject?.content?.needsInput,
             activeNoteKind: beforeActiveAgentNote ? currentNote?.kind : undefined,
             activeNoteEvidenceId: beforeActiveAgentNote ? currentNote?.evidenceId : undefined,
+            activeNoteCursor: beforeActiveAgentNote ? currentNote?.questionCursor : undefined,
             activeNoteRevision: beforeActiveAgentNote ? currentNote?.revision : undefined,
             activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
             sessionTitle: row.title,
@@ -679,7 +689,7 @@ export function attachCoordinatorTools(
             previousSameProject?.reviewKind !== beforeJudgmentReviewKind ||
             !!previousSameProject?.verificationPending !== beforeJudgmentVerificationPending ||
             JSON.stringify(previousSameProject?.verificationTarget ?? null) !== JSON.stringify(beforeJudgmentVerificationTarget ?? null) ||
-            previousSameProject?.questionUserInputId !== beforeJudgmentQuestionUserInputId ||
+            previousSameProject?.questionCursor !== beforeJudgmentQuestionCursor ||
             JSON.stringify(previousSameProject?.openQuestion ?? null) !== JSON.stringify(beforeJudgmentOpenQuestion ?? null)
           ) {
             throw new Error("분류 검증 중 기존 판단이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
@@ -787,18 +797,18 @@ export function attachCoordinatorTools(
           };
         }
         const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
-        let nextQuestionUserInputId: string | undefined;
+        let nextQuestionCursor: string | undefined;
         let nextOpenQuestion: OpenQuestionState | undefined;
         if (input.kind === "question") {
-          nextQuestionUserInputId = previousQuestion
-            ? (previousSameProject.questionUserInputId ?? latest.userInputId ?? "")
-            : (latest.userInputId ?? "");
+          nextQuestionCursor = previousQuestion
+            ? (previousSameProject.questionCursor ?? latest.cursor)
+            : latest.cursor;
         } else if (input.kind === "review" || (input.kind === "idle" && isClarificationReply)) {
           const priorOpenQuestion: OpenQuestionState | undefined = previousSameProject?.openQuestion
             ?? (previousSameProject?.kind === "question"
               ? {
                   evidenceId: previousSameProject.evidenceId,
-                  userInputId: previousSameProject.questionUserInputId ?? "",
+                  cursor: previousSameProject.questionCursor,
                   text: [
                     previousSameProject.text,
                     previousSameProject.content?.question ?? "",
@@ -815,7 +825,7 @@ export function attachCoordinatorTools(
               lastTurn.role === "assistant" &&
               !lastTurn.truncated &&
               priorOpenQuestion.evidenceId !== latest.id &&
-              isOpenQuestionResolved(latest, lastTurn.text, priorOpenQuestion.userInputId, liveAnchoredIssues, priorOpenQuestion.text);
+              isOpenQuestionResolved(latest, lastTurn.text, priorOpenQuestion.cursor, liveAnchoredIssues, priorOpenQuestion.text, priorOpenQuestion.evidenceId, input.questionAnswer);
             if (!resolved) {
               nextOpenQuestion = openQuestionStateSchema.parse(priorOpenQuestion);
             }
@@ -827,7 +837,7 @@ export function attachCoordinatorTools(
           ...(resolvedReviewKind ? { reviewKind: resolvedReviewKind } : {}),
           ...(nextVerificationPending ? { verificationPending: true } : {}),
           ...(nextVerificationTarget ? { verificationTarget: nextVerificationTarget } : {}),
-          ...(nextQuestionUserInputId !== undefined ? { questionUserInputId: nextQuestionUserInputId } : {}),
+          ...(nextQuestionCursor !== undefined ? { questionCursor: nextQuestionCursor } : {}),
           ...(nextOpenQuestion ? { openQuestion: nextOpenQuestion } : {}),
           projectId: row.projectId,
           ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),

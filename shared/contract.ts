@@ -43,6 +43,7 @@ export const noteSchema = z.object({
   sessionId,
   kind: noteKind,
   evidenceId: z.string().max(64).optional(),
+  questionCursor: z.string().max(64).optional(),
   origin: z.enum(["person", "agent"]).optional(),
   requestedAt: z.string().optional(),
   text: z.string().max(2000),

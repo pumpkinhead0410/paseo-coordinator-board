@@ -18,9 +18,9 @@ import {
   type OutcomeVerifier,
 } from "../../server/outcome-verifier";
 import { PreferenceStore } from "../../server/preferences";
-import { recordReport } from "../../server/reporting";
+import { attachReportTool, recordReport } from "../../server/reporting";
 import { sessionClarificationCard } from "../../shared/clarifications";
-import type { Note, SessionRow } from "../../shared/contract";
+import { reportingKey, type Note, type SessionRow } from "../../shared/contract";
 import { decisionCount, displayLane } from "../../shared/decision-count";
 import { legacyRouter } from "../legacy-router";
 
@@ -131,7 +131,7 @@ async function openIssueBoard(options: {
       },
       ref: (id: string) => ({
         timeline: {
-          refetch: async () => {
+          refetch: async ({ limit }: {limit: number}) => {
             timelineRefetchCount += 1;
             options.onTimelineRefetch?.(id, timelineRefetchCount);
             return {
@@ -142,7 +142,7 @@ async function openIssueBoard(options: {
                 item: typeof entry === "string"
                   ? { type: "assistant_message", text: entry }
                   : { type: entry.role === "user" ? "user_message" : "assistant_message", text: entry.text },
-              })),
+              })).slice(-limit),
             };
           },
         },
@@ -172,8 +172,53 @@ async function openIssueBoard(options: {
   const run = async (name: string, input: Record<string, unknown> = {}) =>
     (await tool(name).execute(input, { paseo: sdk, agent: { id: "coord" } })).text;
 
-  return { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, tool, run };
+  return { sdk, prefs, notes, workspaces, agents, timelines, issueStates, commitStates, tool, run };
 }
+
+test.each(["unrelated", "rollover", "reported answer"] as const)("binds stage-two answers to their question: %s", async scenario => {
+  const { run, timelines, sdk, notes, issueStates, commitStates } = await openIssueBoard();
+  const sessionId = "w305";
+  const history = timelines.get(sessionId)!;
+  const question = "2단계 원문과 저작권 규칙을 제공해 주세요.";
+  history.unshift({role: "user", text: "예전 요청"}, {role: "user", text: "예전 원문"});
+  while (history.length < 48) history.push("자료 조사 중");
+  const read = async () => JSON.parse(await run("read_board_conversation", { sessionId }));
+  const opened = await read();
+  if (scenario === "reported answer") {
+    let hook: any;
+    attachReportTool({addHook: (_: string, fn: unknown) => { hook = fn; }} as any, notes);
+    const metadata = {[reportingKey]: true};
+    const { tools } = await hook({request:{purpose:"interactive", metadata, tools:[]}});
+    const handle = {...sdk.agents.ref(sessionId), refresh: async () => {}, metadata};
+    await tools[0].execute({kind:"question", text:question}, {agent:{id:sessionId}, paseo:{agents:{ref:() => handle}}});
+    history.push({role: "user", text: "원문은 첨부본을 쓰고 저작권은 회사명으로 표기하세요."}, "자료를 확인했습니다.");
+  } else {
+    await run("classify_board_conversation", { sessionId, evidenceId: opened.evidenceId, kind: "question",
+      text: question, content: {question, needsInput: "원문과 저작권 규칙"} });
+    if (scenario === "unrelated") history.push({role: "user", text: "1단계 통합 결과만 알려 주세요."});
+  }
+  history.push("#305 1단계 305aaaa 원격 main 통합과 CI 통과를 확인했습니다.");
+  issueStates.set("acme/easydocs#305", {state:"CLOSED", stateReason:"COMPLETED",
+    closing:{status:"commit", sha:"305aaaa".padEnd(40, "0")}});
+  commitStates.set("acme/easydocs@305aaaa", {onMain:true, checks:"passed", resolvedSha:"305aaaa".padEnd(40,"0")});
+  const latest = await read();
+  const close = (questionAnswer?: {questionEvidenceId: string; replyId: string}) => run("classify_board_conversation", {
+    sessionId, evidenceId: latest.evidenceId, kind: "idle", text: "#305 완료", questionAnswer,
+    receipt: {kind:"completed", repo:"acme/easydocs", issue:305, commit:"305aaaa", verifiedCommit:"305aaaa",
+      verification:{source:"ci", status:"passed", summary:"CI passed"}, closeReason:"COMPLETED"} });
+  if (scenario === "reported answer") {
+    const replyId = latest.userReplies.at(-1).replyId;
+    await expect(close({questionEvidenceId: "different-question", replyId})).rejects.toThrow(/사용자 답변/);
+    await close({questionEvidenceId: opened.evidenceId, replyId});
+  } else {
+    await expect(close()).rejects.toThrow(/사용자 답변/);
+    if (scenario === "rollover") {
+      const oldReply = latest.userReplies.at(-1);
+      expect(oldReply.text).toBe("예전 원문");
+      await expect(close({questionEvidenceId: opened.evidenceId, replyId: oldReply.replyId})).rejects.toThrow(/사용자 답변/);
+    }
+  }
+});
 
 test("plan_board_assignment exposes workspace kind, branch, path and session workspaceId for direct worktree assignment and owner reuse", async () => {
   const { run } = await openIssueBoard();
@@ -645,7 +690,7 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
       projectId: "easydocs",
       evidenceId: e305.evidenceId,
       kind: "question",
-      questionUserInputId: "",
+
       text: "#305 2단계 공식 자료·저작권 규칙 대기",
       content: {
         question: "#305 2단계 진행을 위해 공식 CE/UL 안전문 원문, 표지 이미지, 저작권 치환 규칙을 제공해 주실 수 있나요?",
@@ -1219,6 +1264,7 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: verifiedDoneEv.evidenceId,
+    questionAnswer: {questionEvidenceId: inquiryEv.evidenceId, replyId: verifiedDoneEv.userReplies.at(-1).replyId},
     kind: "idle",
     text: "#308 cf6f661 원격 main 통합·CI 통과·GitHub COMPLETED 확인.",
     receipt: validReceipt,
@@ -1382,6 +1428,7 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   await run("classify_board_conversation", {
     sessionId: "w_untitled",
     evidenceId: untitledEv4.evidenceId,
+    questionAnswer: {questionEvidenceId: untitledEv2.evidenceId, replyId: untitledEv4.userReplies.at(-1).replyId},
     kind: "idle",
     text: "#308 완료",
     receipt: validReceipt,

@@ -175,6 +175,8 @@ await classify_board_conversation({
   1. **열린 질문의 결정론적 해소 근거(`userInputId` / 철회 확인) 필수화 및 `review` 경유 보존(`openQuestion`)**: `server/conversation.ts`의 `Evidence`에 비-추가질문 사용자 메시지 서명 `userInputId`를 추가하고 `server/preferences.ts`·`server/coordinator.ts`에서 열린 질문(`question` 및 `review` 경유 `openQuestion`)이 새 사용자 답변(`userInputId` 변화)이나 확정된 질문 철회 없이 `completed`/`not_planned` 영수증만으로 닫히지 않도록 fail-closed 차단했습니다. 또한 `separateTaskWithdrawalPattern`이 부사 `"별도로"`를 별도 작업으로 오인하지 않도록 수정했습니다.
   2. **부정 표현 오차단 해소**: `remainingNeedPattern`에 부정 전방탐색(`필요하지 않`, `필요 없`, `남아 있지 않`, `대기 중이 아니` 등)을 적용해 “추가 승인이 필요하지 않습니다” 같은 정상 완료 발췌가 오차단되지 않도록 수정했습니다.
 
+- **열린 질문의 답변 근거** 열린 질문을 답변으로 해소할 때는 최신 발췌의 `userReplies`에서 요청한 자료·결정을 실제로 제공한 발화를 확인하고 `questionAnswer: {questionEvidenceId, replyId}`로 질문과 답변을 함께 지목합니다. 질문과 무관한 요청이나 일부 자료만 제공한 답변이면 질문을 유지합니다. 서버는 질문 이후 같은 타임라인에서 관측한 사용자 발화인지 확인하고, 답변 내용의 충족 여부는 코디네이터가 판단합니다.
+
 ## Acceptance criteria
 
 1. **확정 구현 최초 배정과 예외 보존(#301·#307·#308 vs #303·#305)**: `plan_board_assignment`가 `workspaces[].kind`·`branch`·`path`와 `sessions[].workspaceId`를 반환해 최종 `worktree`, 공유 `local_checkout`, 기존 담당자 세션을 구분할 수 있어야 합니다.
