@@ -17,7 +17,7 @@ import type { SessionRow, Note } from "../shared/contract";
 import type { Evidence } from "./conversation";
 import { isCurrentMembership, managedSessions } from "./session-links";
 import { canReceiveBoardInput, discoverSessions, permissionVersion } from "./discovery";
-import { isManagedCoordinator } from "./preferences";
+import { hasDecisionAnswer, isManagedCoordinator } from "./preferences";
 
 type Sdk = PluginHandlerContext["paseo"];
 type Stored = Preferences["clarifications"][string];
@@ -84,7 +84,7 @@ export function restoreClarifiedDecision(
       original.sessionId !== row.id ||
       original.version !== record.savedDecision.version ||
       record.recipientId !== row.id ||
-      prefs.answers[row.id]?.version === original.version ||
+      hasDecisionAnswer(prefs.answers[row.id], original.version) ||
       (note?.revision ?? 0) !== record.noteRevision
     )
       continue;
@@ -279,7 +279,7 @@ export class ClarificationSender {
         if (
           !inScope(current, input.card) ||
           current.coordinator !== view.coordinator ||
-          (original && (current.answers[original.sessionId]?.version === original.version ||
+          (original && (hasDecisionAnswer(current.answers[original.sessionId], original.version) ||
             JSON.stringify(current.judgments[original.sessionId]) !== JSON.stringify(scope.judgments[original.sessionId]))) ||
           (source && !isCurrentMembership(source, current)) ||
           !(

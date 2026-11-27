@@ -14,7 +14,7 @@ import { boardDecisionCount, boardScope, boardSnapshot, reportingKey, saveNote, 
 import { canReceiveBoardInput, discoverSessions } from "./server/discovery";
 import { attachReportTool } from "./server/reporting";
 import { ConversationReader, excerpt } from "./server/conversation";
-import { isManagedCoordinator, setCoordinator, PreferenceStore } from "./server/preferences";
+import { hasDecisionAnswer, isManagedCoordinator, setCoordinator, PreferenceStore } from "./server/preferences";
 import { trackedReviewTool } from "./server/tracked-review";
 import { attachCoordinatorTools } from "./server/coordinator";
 import { createOperations } from "./server/operations";
@@ -149,7 +149,7 @@ export default function contribute(server: PluginServerContext) {
         return [entry.recipientId];
       }
       const original = sourceQuestion(entry.card);
-      return original && entry.savedDecision && original.version !== scope.answers[original.sessionId]?.version
+      return original && entry.savedDecision && !hasDecisionAnswer(scope.answers[original.sessionId], original.version)
         ? [entry.recipientId] : [];
     }));
     // A running recipient may already have accepted a clarification, even

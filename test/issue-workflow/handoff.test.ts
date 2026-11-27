@@ -396,8 +396,6 @@ test("question-specific withdrawal and replies can resolve separate open questio
   const before = f.prefs.read().judgments.w305;
   await expect(finish(partial.evidenceId, retentionAnswer)).rejects.toThrow(/질문/);
   expect(f.prefs.read().judgments.w305).toEqual(before);
-  await expect(classify({evidenceId: partial.evidenceId, kind: "review", text: "부분 확인", receipt, questionAnswer: retentionAnswer}))
-    .rejects.toThrow(/receipt는 kind: 'idle'/);
   append({role: "user", text: "표지 이미지는 cover.png를 사용하세요."},
     "원문 보존 기간과 표지 이미지 경로를 알려 주세요.\nH1 사진 검토 요청이 취소됐습니다.");
   const stillAsking = await read();
@@ -2123,4 +2121,185 @@ test("PD-1: coordinator idle judgment on newer evidence supersedes earlier agent
   expect(clarifyRow.lane).toBe("human");
   expect(clarifyRow.decision).toEqual(initialClarify.row.decision);
   expect(displayLane(clarifyRow, clarifyNote)).toBe("human");
+});
+const stageTwoInputs = {question: "공식 CE/UL 안전문 원문, 표지 이미지, 회사 저작권 치환 규칙을 알려 주세요.",
+  needsInput: "공식 CE/UL 안전문 원문, 표지 이미지, 회사 저작권 치환 규칙"};
+const stageOneClosed = {kind: "completed", repo: "acme/easydocs", issue: 305, commit: "305aaaa", verifiedCommit: "305aaaa",
+  verification: {source: "ci", status: "passed", summary: "CI passed"}, closeReason: "COMPLETED"};
+const stageOneExcerpt = "#305 1단계 305aaaa 원격 main 통합과 CI 통과를 확인했습니다.";
+
+async function reviewFixture(sessionId = "w305") {
+  const f = await openIssueBoard();
+  if (sessionId === "wmisc") {
+    f.agents.push({...f.agents.find(a => a.id === "w305")!, id: sessionId, title: "일반 운영 세션"});
+    f.timelines.set(sessionId, ["운영 일정을 확인 중입니다."]);
+  }
+  f.issueStates.set("acme/easydocs#305", {state: "CLOSED", stateReason: "COMPLETED",
+    closing: {status: "commit", sha: "305aaaa".padEnd(40, "0")}});
+  f.commitStates.set("acme/easydocs@305aaaa", {onMain: true, checks: "passed", resolvedSha: "305aaaa".padEnd(40, "0")});
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
+  const card = async () => projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId)?.session.decision;
+  const reply = (version: string, requestKey: string, text: string) => board.reply({
+    projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply", version, requestKey, text,
+  });
+  const ask = async (question: string, needsInput?: string) => {
+    const {evidenceId} = await read();
+    await classify({evidenceId, kind: "question", text: question, content: {question, needsInput}});
+    return evidenceId;
+  };
+  return {...f, read, classify, append, card, reply, ask};
+}
+
+test("REPRO-1: partial board reply permits a second reply on the same saved question", async () => {
+  const f = await reviewFixture();
+  const original = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  const v1 = (await f.card())!.version;
+  const first = await f.reply(v1, "partial-question-1", "표지 이미지는 cover.png입니다.");
+  expect(await f.card()).toBeUndefined();
+  f.append({role: "user", text: "표지 이미지는 cover.png입니다."},
+    "표지 이미지는 기록했습니다. 공식 CE/UL 안전문 원문과 회사 저작권 치환 규칙을 알려 주세요.");
+  const pending = await f.card();
+  expect(pending).toMatchObject({...stageTwoInputs, evidenceId: original});
+  expect(pending!.version).not.toBe(v1);
+  const latest = await f.read();
+  await f.classify({evidenceId: latest.evidenceId, kind: "review", text: "안전문과 저작권 대기"});
+  f.append("1단계 검증 자료를 정리했습니다.");
+  expect(await f.card()).toMatchObject({evidenceId: original, version: pending!.version});
+  const second = await f.reply(pending!.version, "partial-question-2", "안전문 원문과 저작권 규칙을 첨부합니다.");
+  expect(second.messageId).not.toBe(first.messageId);
+  expect(await f.reply(v1, "partial-question-1", "표지 이미지는 cover.png입니다.")).toEqual(first);
+  expect(await f.reply(pending!.version, "partial-question-2", "안전문 원문과 저작권 규칙을 첨부합니다.")).toEqual(second);
+  expect(f.sent).toHaveLength(2);
+  expect(JSON.parse(f.sent[1].text.split("\n")[1])).toMatchObject({evidenceId: original, revision: pending!.version});
+  expect(await f.card()).toBeUndefined();
+});
+
+test("REPRO-2: a cited partial answer cannot erase a remaining safety text requirement", async () => {
+  const f = await reviewFixture();
+  const original = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  f.append({role: "user", text: "표지 이미지는 cover.png입니다."},
+    "표지 이미지는 기록했습니다. 다만 공식 CE/UL 안전문 원문은 여전히 필요합니다.");
+  const partial = await f.read();
+  const partialAnswer = {questionEvidenceId: original, replyId: partial.userReplies.at(-1).replyId};
+  f.append(stageOneExcerpt);
+  const silent = await f.read();
+  await expect(f.classify({evidenceId: silent.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed,
+    questionAnswer: partialAnswer})).rejects.toThrow(/열린 질문/);
+  f.append("공식 CE/UL 안전문 원문은 여전히 필요합니다.");
+  const stillWaiting = await f.read();
+  await f.classify({evidenceId: stillWaiting.evidenceId, kind: "review", text: "#305 표지 확인 및 1단계 검증", questionAnswer: partialAnswer});
+  expect(await f.card()).toMatchObject({evidenceId: original, needsInput: stageTwoInputs.needsInput});
+  f.append(stageOneExcerpt);
+  const complete = await f.read();
+  const close = {evidenceId: complete.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed};
+  await expect(f.classify(close)).rejects.toThrow(/열린 질문/);
+  await expect(f.classify({...close, questionAnswer: partialAnswer})).rejects.toThrow(/열린 질문/);
+  f.append({role: "user", text: "공식 CE/UL 안전문 원문과 저작권 규칙을 첨부했습니다."}, stageOneExcerpt);
+  const full = await f.read();
+  await f.classify({...close, evidenceId: full.evidenceId,
+    questionAnswer: {questionEvidenceId: original, replyId: full.userReplies.at(-1).replyId}});
+  expect(await f.card()).toBeUndefined();
+});
+
+test("REPRO-3: answering a coordinator question preserves a prior agent-note answer", async () => {
+  const f = await reviewFixture("wmisc");
+  const e1 = await f.read();
+  recordReport(f.notes, "wmisc", {kind: "question", text: "H1 사진 검토 확인 필요"}, e1.evidenceId);
+  const note = (await f.card())!;
+  expect(note.source).toBe("agent-note");
+  const first = await f.reply(note.version, "first-note-reply", "H1 사진 검토를 확인했습니다.");
+  f.append({role: "user", text: "H1 사진 검토를 확인했습니다."}, "표기 형식을 선택해 주세요.");
+  const e2 = await f.ask("표기 형식을 선택해 주세요.");
+  const coordinated = (await f.card())!;
+  expect(coordinated.source).toBe("coordinator");
+  await f.reply(coordinated.version, "second-coord-reply", "표준 형식으로 진행하세요.");
+  expect(f.prefs.read().answers.wmisc?.noteRevision).toBe(1);
+  f.append({role: "user", text: "표준 형식으로 진행하세요."}, "표기 형식을 기록했습니다.");
+  const e3 = await f.read();
+  await f.classify({evidenceId: e3.evidenceId, kind: "review", text: "표기 형식 확인",
+    questionAnswer: {questionEvidenceId: e2, replyId: e3.userReplies.at(-1).replyId}});
+  expect(await f.card()).toBeUndefined();
+  expect(await f.reply(note.version, "first-note-reply", "H1 사진 검토를 확인했습니다.")).toEqual(first);
+  expect(f.sent).toHaveLength(2);
+});
+
+test.each(["REPRO-4", "REPRO-4B"])("%s: review records a targeted withdrawal while other work remains", async scenario => {
+  const verification = scenario === "REPRO-4";
+  const f = await reviewFixture(verification ? "w305" : "wmisc");
+  let first: string | undefined;
+  if (verification) {
+    const e0 = await f.read();
+    await f.classify({evidenceId: e0.evidenceId, kind: "review", reviewKind: "verification", text: "#305 1단계 통합 검증 대기"});
+  } else {
+    f.append("공식 CE/UL 안전문 원문을 알려 주세요.");
+    first = await f.ask("공식 CE/UL 안전문 원문을 알려 주세요.", "공식 CE/UL 안전문 원문");
+  }
+  f.append("H1 사진 검토를 확인해 주세요.");
+  const h1 = await f.ask("H1 사진 검토 요청");
+  f.append(verification ? "H1 사진 검토 요청이 취소됐습니다. #305 1단계 통합 검증을 기다립니다."
+    : "H1 사진 검토 요청이 취소됐습니다. 공식 CE/UL 안전문 원문은 여전히 필요합니다.");
+  const cancelled = await f.read();
+  const receipt = {kind: "withdrawn", targetEvidenceId: h1, reason: "H1 사진 검토 취소"};
+  await expect(f.classify({evidenceId: cancelled.evidenceId, kind: "idle", text: "H1 취소", receipt})).rejects.toThrow();
+  await f.classify({evidenceId: cancelled.evidenceId, kind: "review", text: "H1 취소 확인", receipt});
+  expect(f.prefs.read().judgments[verification ? "w305" : "wmisc"].openQuestions?.map(q => q.evidenceId) ?? []).toEqual(first ? [first] : []);
+  if (verification) {
+    expect(f.prefs.read().judgments.w305.verificationPending).toBe(true);
+    f.append(stageOneExcerpt);
+    const completed = await f.read();
+    await f.classify({evidenceId: completed.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed});
+  } else {
+    expect(await f.card()).toMatchObject({evidenceId: first});
+    f.append({role: "user", text: "공식 안전문 원문입니다."}, "공식 CE/UL 안전문 원문을 기록했습니다.");
+    const completed = await f.read();
+    await f.classify({evidenceId: completed.evidenceId, kind: "idle", text: "남은 결정 없음",
+      questionAnswer: {questionEvidenceId: first, replyId: completed.userReplies.at(-1).replyId}});
+  }
+  expect(await f.card()).toBeUndefined();
+});
+
+test("REPRO-5: targetless, stale and still-open withdrawals cannot clear a card", async () => {
+  const f = await reviewFixture("wmisc");
+  f.append("표지 이미지 경로를 알려 주세요.\n요청이 취소됐습니다.");
+  const latest = await f.read();
+  await expect(f.classify({evidenceId: latest.evidenceId, kind: "idle", text: "남은 일 없음",
+    receipt: {kind: "withdrawn", targetEvidenceId: "unrelated", targetNoteRevision: 99, reason: "무관한 영수증"}})).rejects.toThrow(/targetEvidenceId/);
+  f.append("H1 사진 검토 요청을 확인해 주세요.");
+  const h1 = await f.ask("H1 사진 검토 요청");
+  const receipt = {kind: "withdrawn", targetEvidenceId: h1, reason: "H1 취소"};
+  f.append("H1 사진 검토 요청을 확인해 주세요.\nH1 사진 검토 요청이 취소됐습니다.");
+  const conflicting = await f.read();
+  await expect(f.classify({evidenceId: conflicting.evidenceId, kind: "review", text: "철회 확인", receipt})).rejects.toThrow();
+  expect(await f.card()).toMatchObject({evidenceId: h1});
+  f.append("H1 사진 검토 요청이 취소됐습니다.");
+  const cancelled = await f.read();
+  await f.classify({evidenceId: cancelled.evidenceId, kind: "review", text: "철회 확인", receipt});
+  await expect(f.classify({evidenceId: cancelled.evidenceId, kind: "review", text: "철회 확인", receipt})).rejects.toThrow(/targetEvidenceId/);
+});
+
+test("CHECK-3B: a conversation reply leaves a separate agent-note unanswered", async () => {
+  const f = await reviewFixture();
+  const e1 = await f.read();
+  recordReport(f.notes, "w305", {kind: "question", text: "H1 사진 검토 확인 필요"}, e1.evidenceId);
+  const card = (await f.card())!;
+  expect(card.source).toBe("conversation");
+  await f.reply(card.version, "check-conversation-reply", "안전문 원문을 첨부합니다.");
+  expect(f.prefs.read().answers.w305?.noteRevision).toBeUndefined();
+});
+
+test("CHECK-6: full #305 resolution and reply retry are preserved", async () => {
+  const f = await reviewFixture();
+  const original = await f.ask(stageTwoInputs.question, stageTwoInputs.needsInput);
+  const version = (await f.card())!.version;
+  const text = "안전문 원문, cover.png, 회사명 저작권 규칙 모두 첨부했습니다.";
+  const sent = await f.reply(version, "check-full-reply-1", text);
+  expect(await f.reply(version, "check-full-reply-1", text)).toEqual(sent);
+  expect(await f.reply(version, "check-full-reply-2", text)).toEqual(sent);
+  expect(f.sent).toHaveLength(1);
+  f.append({role: "user", text}, stageOneExcerpt);
+  const completed = await f.read();
+  await f.classify({evidenceId: completed.evidenceId, kind: "idle", text: "#305 완료", receipt: stageOneClosed,
+    questionAnswer: {questionEvidenceId: original, replyId: completed.userReplies.at(-1).replyId}});
+  expect(await f.card()).toBeUndefined();
 });
