@@ -372,7 +372,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, summary: "D155 로컬 통과" } },
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, receiptPath: "manifest.json", summary: "D155 로컬 통과" } },
   })).rejects.toThrow(/검증 상태가 failed/);
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
@@ -383,14 +383,14 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     text: "#308 완료",
     receipt: baseReceipt,
   })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
-  // Local verification without execution evidence of that command in the closing excerpt is also rejected fail-closed!
+  // Local verification without a verified local receipt file (commit + command + exitCode 0) is rejected fail-closed!
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, summary: "D155 로컬 통과" } },
-  })).rejects.toThrow(/로컬 검증 영수증.*확인되지 않아/);
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, receiptPath: "manifest.json", summary: "D155 로컬 통과" } },
+  })).rejects.toThrow(/로컬 검증 영수증 파일/);
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
   commitStates.set("acme/easydocs@e9fe346", { onMain: true, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" });
@@ -781,19 +781,6 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     url: "https://github.com/acme/EasyDocs/issues/314",
     closing: { status: "unavailable" },
   });
-  // Commit with negated fix ("Does not fix #308"), PR ref ("PR acme/easydocs#308"), or foreign repo ("Fixes other/easydocs#308") must NOT yield issue 308!
-  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "f00ba40")).toEqual({
-    onMain: true,
-    resolvedSha: "f00ba40000000000000000000000000000000000",
-    checks: "passed",
-  });
-  // Positive closing keyword ("Closes acme/easydocs#308") DOES link issue 308!
-  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "f00ba41")).toEqual({
-    onMain: true,
-    resolvedSha: "f00ba41000000000000000000000000000000000",
-    issues: [308],
-    checks: "passed",
-  });
   expect(await verifier.verifyIssue("acme/easydocs", 309)).toEqual({
     state: "UNKNOWN",
     stateReason: "UNKNOWN",
@@ -820,6 +807,41 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     resolvedSha: "cf6f661000000000000000000000000000000000",
     checks: "passed",
   });
+  // Verify local JSON receipt file checks: exact SHA + command + exitCode 0 + workspace containment!
+  const receiptWorkspace = mkdtempSync(join(tmpdir(), "board-local-receipt-"));
+  dirs.push(receiptWorkspace);
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(
+    join(receiptWorkspace, "manifest.json"),
+    JSON.stringify({ commit: "cf6f661", command: "npm test", exitCode: 0, status: "passed" }),
+  );
+  writeFileSync(
+    join(receiptWorkspace, "old-manifest.json"),
+    JSON.stringify({ commit: "e9fe346", command: "npm test", exitCode: 0, status: "passed" }),
+  );
+  expect(
+    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
+      command: "npm test",
+      exitCode: 0,
+      receiptPath: "manifest.json",
+    }),
+  ).toBe(true);
+  // Prior commit e9fe346 receipt cannot validate cf6f661!
+  expect(
+    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
+      command: "npm test",
+      exitCode: 0,
+      receiptPath: "old-manifest.json",
+    }),
+  ).toBe(false);
+  // Path traversal or missing file fails closed!
+  expect(
+    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
+      command: "npm test",
+      exitCode: 0,
+      receiptPath: "../manifest.json",
+    }),
+  ).toBe(false);
   expect(calls.every(c => c.startsWith("gh "))).toBe(true);
 });
 
@@ -975,16 +997,19 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   const legacyPrefs = new PreferenceStore(legacyScopePath);
   expect(legacyPrefs.read().judgments.w305.receipt).toEqual({ kind: "withdrawn", reason: "이전 판본 철회" });
 
-  // 7. Timeline lookup failure ("unavailable") and foreign closing commit ("foreign_commit") MUST fail closed even when commit message references #308!
+  // 7. Manual close without GitHub closing commit, timeline lookup failure ("unavailable"), and foreign closing commit MUST all fail closed!
   workspaces[1].gitRuntime.remoteUrl = "https://github.com/acme/EasyDocs.git";
   midVerifyAction = undefined;
   commitStates.set("acme/easydocs@cf6f661", {
     onMain: true,
     resolvedSha: "cf6f661000000000000000000000000000000000",
-    issues: [308],
     checks: "passed",
   });
-  for (const closing of [{ status: "unavailable" as const }, { status: "foreign_commit" as const }]) {
+  for (const closing of [
+    { status: "manual" as const },
+    { status: "unavailable" as const },
+    { status: "foreign_commit" as const },
+  ]) {
     issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED", closing });
     await expect(run("classify_board_conversation", {
       sessionId: "w308",
@@ -992,7 +1017,7 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
       kind: "idle",
       text: "#308 완료",
       receipt: validReceipt,
-    })).rejects.toThrow(/최종 종료 커밋 연결을 확인할 수 없어/);
+    })).rejects.toThrow(/최종 GitHub 종료 커밋을 확인할 수 없어/);
   }
   // When neither closing nor closingCommits is present, also fail closed!
   issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });

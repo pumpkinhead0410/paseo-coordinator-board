@@ -65,30 +65,6 @@ function commitCitedInText(text: string, commit: string, resolvedSha?: string): 
   });
 }
 
-const localPassOutcomePattern = /(?:통과|성공|일치|PASS|0\s*fail|exit(?:\s*code)?\s*[:=]?\s*0|\bpassed\b)/i;
-const localFailOutcomePattern = /(?:실패|통과하지\s*못|미실행|미검증|보류|오류|에러|\bfailed\b|\berror\b|exit(?:\s*code)?\s*[:=]?\s*[1-9])/i;
-
-function hasLocalVerificationEvidenceInText(text: string, command: string): boolean {
-  const normalizedCommand = command.trim().toLowerCase();
-  if (!normalizedCommand) return false;
-  const clauses = text
-    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|(?<!#\d+)\s*·\s*(?!#\d+\b))/)
-    .map(s => s.trim())
-    .filter(Boolean);
-  const commandTokens = normalizedCommand
-    .split(/\s+/)
-    .map(t => t.replace(/^["'`(]+|["'`):,;]+$/g, ""))
-    .filter(t => t.length >= 2 && !["run", "exec", "--"].includes(t));
-  return clauses.some(clause => {
-    const lower = clause.toLowerCase();
-    const matchesCommand =
-      lower.includes(normalizedCommand) ||
-      (commandTokens.length > 0 && commandTokens.every(token => lower.includes(token)));
-    if (!matchesCommand) return false;
-    return localPassOutcomePattern.test(clause) && !localFailOutcomePattern.test(clause);
-  });
-}
-
 function matchesQuestionTopic(sentenceTokens: Set<string>, questionTokens: Set<string>): boolean {
   if (questionTokens.size === 0) return true;
   if (sentenceTokens.size === 0) return false;
@@ -309,12 +285,8 @@ export async function verifyIdleClassification(
       if (!sameCommitRef(closing.sha, receipt.commit, commitOutcome.resolvedSha)) {
         return `통합 커밋(${receipt.commit})이 대상 이슈(${receipt.repo}#${receipt.issue})의 최종 종료 커밋(${closing.sha.slice(0, 7)})과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
       }
-    } else if (closing.status === "manual") {
-      if (!commitOutcome.issues?.includes(receipt.issue)) {
-        return `수동 종료된 이슈(${receipt.repo}#${receipt.issue})는 원격 통합 커밋(${receipt.commit}) 메시지에서 대상 이슈 참조가 확인돼야 검증 대기를 idle로 내릴 수 있습니다.`;
-      }
     } else {
-      return `대상 이슈(${receipt.repo}#${receipt.issue})의 최종 종료 커밋 연결을 확인할 수 없어(${closing.status}) 검증 대기를 idle로 내릴 수 없습니다.`;
+      return `대상 이슈(${receipt.repo}#${receipt.issue})의 최종 GitHub 종료 커밋을 확인할 수 없어(${closing.status}) 검증 대기를 idle로 내릴 수 없습니다.`;
     }
   } else if (issueOutcome.closingCommits && issueOutcome.closingCommits.length > 0) {
     if (!issueOutcome.closingCommits.some(sha => sameCommitRef(sha, receipt.commit, commitOutcome.resolvedSha))) {
@@ -326,9 +298,6 @@ export async function verifyIdleClassification(
   if (!commitCitedInText(last.text, receipt.commit, commitOutcome.resolvedSha)) {
     return `영수증의 통합 커밋(${receipt.commit})이 최신 완료 발췌의 통합 근거와 연결되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
   }
-  if (commitOutcome.issues && commitOutcome.issues.length > 0 && !commitOutcome.issues.includes(receipt.issue)) {
-    return `통합 커밋(${receipt.commit})의 대상 이슈(${commitOutcome.issues.map(n => `#${n}`).join(", ")})가 영수증 이슈(#${receipt.issue})와 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
-  }
   if (!sameCommitRef(receipt.commit, receipt.verifiedCommit, commitOutcome.resolvedSha)) {
     return `검증 커밋(${receipt.verifiedCommit})이 통합 커밋(${receipt.commit})과 일치하지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
   }
@@ -339,8 +308,12 @@ export async function verifyIdleClassification(
     return `통합 커밋(${receipt.commit})의 통과된 CI 체크를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다(현재 상태: ${commitOutcome.checks}).`;
   }
   if (receipt.verification.source === "local" && commitOutcome.checks !== "passed") {
-    if (!hasLocalVerificationEvidenceInText(last.text, receipt.verification.command)) {
-      return `로컬 검증 영수증(${receipt.verification.command})의 실행·통과 근거가 최신 발췌에서 확인되지 않아 검증 대기를 idle로 내릴 수 없습니다.`;
+    const verified =
+      commitOutcome.resolvedSha && verifier.verifyLocalReceipt
+        ? await verifier.verifyLocalReceipt(context.workspacePath, commitOutcome.resolvedSha, receipt.verification)
+        : false;
+    if (!verified) {
+      return `로컬 검증 영수증 파일(${receipt.verification.receiptPath})에서 대상 커밋(${receipt.commit})·명령(${receipt.verification.command})·exitCode 0 통과를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
     }
   }
   return null;
@@ -417,7 +390,7 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}|{source:'local', status:'passed', command, exitCode:0, summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}|{source:'local', status:'passed', command, exitCode:0, receiptPath, summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);

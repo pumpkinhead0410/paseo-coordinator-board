@@ -22,6 +22,7 @@ const submittedVerificationSchema = z.discriminatedUnion("source", [
     status: z.literal("passed"),
     command: z.string().trim().min(1).max(300),
     exitCode: z.literal(0),
+    receiptPath: z.string().trim().min(1).max(300),
     summary: z.string().trim().min(1).max(300),
   }),
 ]);
@@ -30,6 +31,7 @@ const storedVerificationSchema = z.object({
   status: z.literal("passed"),
   command: z.string().trim().min(1).max(300).optional(),
   exitCode: z.literal(0).optional(),
+  receiptPath: z.string().trim().min(1).max(300).optional(),
   summary: z.string().trim().min(1).max(300),
 });
 const completedReceiptSchema = z.object({

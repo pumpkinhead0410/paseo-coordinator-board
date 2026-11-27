@@ -138,6 +138,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 19차 `42f1e20` 지적 2건 반영)**:
   1. `extractCommitIssues`가 PR 참조(`PR acme/easydocs#308`)와 부정 문맥(`Does not fix #308`)을 제외하고 긍정적 GitHub 종료 키워드(`Fixes`/`Closes`/`Resolves`)에 연결된 동일 저장소 이슈 참조만 인정하도록 강화했습니다(`server/outcome-verifier.ts`).
   2. `local` 검증 영수증 제출 시 `command`와 `exitCode: 0`을 필수로 요구하고(저장 스키마 호환 유지), 원격 CI 통과가 없는 경우 최신 발췌에서 해당 검증 명령의 실행·통과 근거(`hasLocalVerificationEvidenceInText`)가 확인되지 않으면 fail-closed로 거절하도록 강화했습니다(`server/preferences.ts`, `server/coordinator.ts`).
+- **2026-11-27 (독립 의도 리뷰 20차 `e2c37f6` 지적 2건 반영 — 텍스트 휴리스틱 우회 경로 제거)**:
+  1. 수동 종료 커밋 메시지 정규식 대체 경로를 제거하고, GitHub 이슈 타임라인의 최종 `closed` 이벤트에 기록된 동일 저장소 종료 커밋(`closing.status === "commit"`)이 영수증 커밋과 일치할 때만 완료로 인정하도록 fail-closed 단순화했습니다(`server/outcome-verifier.ts`, `server/coordinator.ts`).
+  2. `local` 검증의 자유 문장 정규식 대조를 제거하고 `receiptPath` 필드와 `OutcomeVerifier.verifyLocalReceipt`를 도입해, 워크스페이스 내부의 실제 구조화 JSON 영수증 파일에서 대상 커밋 SHA(`resolvedSha`)·실행 명령·`exitCode: 0`·`status: "passed"`가 일치할 때만 로컬 검증을 인정하도록 결정적으로 전환했습니다(`server/outcome-verifier.ts`, `server/preferences.ts`, `server/coordinator.ts`).
 
 ## Acceptance criteria
 

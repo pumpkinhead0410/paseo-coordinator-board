@@ -1,5 +1,6 @@
 import { execCommand } from "@getpaseo/plugin/server";
-import { join } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { repositorySlug } from "../shared/prs";
 
@@ -21,12 +22,21 @@ export type CommitCheckStatus = "passed" | "failed" | "pending" | "unavailable";
 export type CommitVerification = {
   onMain: boolean;
   resolvedSha?: string;
-  issues?: number[];
   checks: CommitCheckStatus;
+};
+export type LocalVerificationRequest = {
+  command: string;
+  exitCode: 0;
+  receiptPath: string;
 };
 export type OutcomeVerifier = {
   verifyIssue(repo: string, issue: number): Promise<IssueOutcome>;
   verifyMainCommit(workspacePath: string | undefined, repo: string, commit: string): Promise<CommitVerification>;
+  verifyLocalReceipt?(
+    workspacePath: string | undefined,
+    resolvedSha: string,
+    verification: LocalVerificationRequest,
+  ): Promise<boolean>;
 };
 
 const commitHashPattern = /^[0-9a-f]{7,40}$/i;
@@ -127,57 +137,34 @@ export function summarizeCommitChecks(
 
 const rawCommitMeta = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/i),
-  commit: z.object({ message: z.string().optional() }).optional(),
 });
-
-const negatedClosePrefixPattern = /(?:(?:does|did|will|would|can|could|should)\s+not|(?:doesn't|didn't|won't|can't|not|never|no))\s+$/i;
-
-function extractCommitIssues(message: string | undefined, targetRepo: string): number[] | undefined {
-  if (!message) return undefined;
-  const expectedRepo = targetRepo.toLowerCase();
-  const cleaned = message
-    .replace(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi, " ")
-    .replace(/(?:\bPR\b|pull\s*request)\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/gi, " ");
-  const ids = new Set<number>();
-  const closingRefPattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/(\d+)|(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+))\b/gi;
-  for (const match of cleaned.matchAll(closingRefPattern)) {
-    const start = match.index ?? 0;
-    const prefix = cleaned.slice(Math.max(0, start - 24), start);
-    if (negatedClosePrefixPattern.test(prefix)) continue;
-    const repo = (match[1] ?? match[3])?.toLowerCase();
-    if (repo && repo !== expectedRepo) continue;
-    const n = Number(match[2] ?? match[4]);
-    if (Number.isSafeInteger(n) && n > 0) ids.add(n);
-  }
-  return ids.size > 0 ? [...ids] : undefined;
-}
+const localReceiptFileSchema = z.object({
+  commit: z.string().trim().regex(/^[0-9a-f]{7,40}$/i),
+  command: z.string().trim().min(1).max(300),
+  exitCode: z.literal(0),
+  status: z.literal("passed"),
+});
 
 async function resolveRemoteMainAncestry(
   repo: string,
   commit: string,
   runner: (command: "git" | "gh", args: string[]) => Promise<string>,
-): Promise<{ onMain: boolean; resolvedSha?: string; issues?: number[] }> {
+): Promise<{ onMain: boolean; resolvedSha?: string }> {
   try {
-    const raw = (await runner("gh", ["api", `repos/${repo}/commits/${commit}`, "--jq", "{sha:.sha,commit:{message:.commit.message}}"])).trim();
-    let sha = "";
-    let issues: number[] | undefined;
-    if (/^[0-9a-f]{40}$/i.test(raw)) {
-      sha = raw.toLowerCase();
-    } else {
-      const parsed = rawCommitMeta.parse(JSON.parse(raw));
-      sha = parsed.sha.toLowerCase();
-      issues = extractCommitIssues(parsed.commit?.message, repo);
-    }
+    const raw = (await runner("gh", ["api", `repos/${repo}/commits/${commit}`, "--jq", "{sha:.sha}"])).trim();
+    const sha = /^[0-9a-f]{40}$/i.test(raw)
+      ? raw.toLowerCase()
+      : rawCommitMeta.parse(JSON.parse(raw)).sha.toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(sha)) return { onMain: false };
     for (const base of ["main", "master"]) {
       try {
         const status = (await runner("gh", ["api", `repos/${repo}/compare/${base}...${sha}`, "--jq", ".status"])).trim().toLowerCase();
-        if (status === "identical" || status === "behind") return { onMain: true, resolvedSha: sha, ...(issues ? { issues } : {}) };
+        if (status === "identical" || status === "behind") return { onMain: true, resolvedSha: sha };
       } catch {
         continue;
       }
     }
-    return { onMain: false, resolvedSha: sha, ...(issues ? { issues } : {}) };
+    return { onMain: false, resolvedSha: sha };
   } catch {
     return { onMain: false };
   }
@@ -372,7 +359,32 @@ export function createOutcomeVerifier(
         return { onMain: false, resolvedSha: resolved.resolvedSha, checks: "unavailable" };
       }
       const checks = await lookupCommitChecks(parsedRepo.data, resolved.resolvedSha, runner);
-      return { onMain: true, resolvedSha: resolved.resolvedSha, ...(resolved.issues ? { issues: resolved.issues } : {}), checks };
+      return { onMain: true, resolvedSha: resolved.resolvedSha, checks };
+    },
+
+    async verifyLocalReceipt(
+      workspacePath: string | undefined,
+      resolvedSha: string,
+      verification: LocalVerificationRequest,
+    ): Promise<boolean> {
+      if (!workspacePath || !isAbsolute(workspacePath)) return false;
+      const rel = verification.receiptPath.trim();
+      if (!rel || isAbsolute(rel) || rel.includes("\0")) return false;
+      try {
+        const rootReal = await realpath(workspacePath);
+        const candidate = resolve(rootReal, rel);
+        const targetReal = await realpath(candidate);
+        const inside = relative(rootReal, targetReal);
+        if (!inside || inside.startsWith("..") || isAbsolute(inside)) return false;
+        const raw = await readFile(targetReal, "utf8");
+        const parsed = localReceiptFileSchema.parse(JSON.parse(raw));
+        const fullSha = resolvedSha.trim().toLowerCase();
+        const fileSha = parsed.commit.trim().toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(fullSha) || !fullSha.startsWith(fileSha)) return false;
+        return parsed.command.trim() === verification.command.trim() && parsed.exitCode === 0 && parsed.status === "passed";
+      } catch {
+        return false;
+      }
     },
   };
 }
