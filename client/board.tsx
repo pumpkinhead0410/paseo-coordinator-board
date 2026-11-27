@@ -17,7 +17,7 @@ import type { PullRequestItem } from "../shared/prs";
 import { getPaseoClient, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { remoteScope, readRemoteHistorySession } from "./remote-sessions";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { DecisionActions, type DecisionReceipt } from "./decision-actions";
 import { Clarification } from "./clarification";
 import { clarificationKey, clarificationRecipient, sessionClarificationCard, trackedClarificationCard, type ClarificationCard } from "../shared/clarifications";
@@ -265,9 +265,44 @@ export function BoardView({ snapshot, readiness, theme, layout, hostLabel, hostI
     }
     activeRows.set(key, <DecisionEditingRow rowKey={key} position={position} onEditing={onEditing}>{content}</DecisionEditingRow>);
   });
+  const [activeTab, setActiveTab] = useState<"work" | "kanban">("work");
   const c = theme.colors;
+  const pendingCount = filters.length ? filteredTotal : total;
+  const visibleCards = visibleProjects.flatMap(project => project.cards);
+  const runningCount = visibleCards.filter(card => card.lane === "running").length;
+  const reviewCount = visibleCards.filter(card => card.lane === "review").length;
+  const idleCount = visibleCards.filter(card => card.lane === "idle").length;
+  const historyCount = filteredHistory.length;
+  const kanbanTotal = visibleCards.length + historyCount;
+  const decisionsSection = <>
+      {!settings && !snapshot && !error && !!readiness?.decisionTitles?.length && <View style={{ gap: 6 }}>
+        <Text accessibilityRole="header" style={{ color: c.foreground, fontSize: 17, fontWeight: "700" }}>{t("내 결정", "My decisions")}</Text>
+        {readiness.decisionTitles.map((title, index) => <Text key={index} numberOfLines={2} style={{ color: c.foreground }}>{title}</Text>)}
+        <Text style={{ color: c.foregroundMuted }}>{t("세션과 PR 상태를 확인하고 있어요.", "Checking session and PR status…")}</Text>
+      </View>}
+      {!settings && snapshot && configured && <View style={{ gap: layout.compact ? 12 : 16 }}>
+        <Text accessibilityRole="header" style={{ color: c.foreground, fontSize: 17, fontWeight: "700" }}>{filters.length ? t(`내 결정 · ${filteredTotal}건 / 전체 ${total}건`, `My decisions · ${filteredTotal} of ${total}`) : t(`내 결정 · ${total}건`, `My decisions · ${total}`)}</Text>
+        {incomplete &&
+          <Text accessibilityLiveRegion="polite" style={{ color: c.statusWarning }}>{t("일부 결정 기록을 읽지 못했습니다. 현재 건수에는 확인한 항목만 포함됩니다.", "Some decision records could not be loaded. The count includes the available items.")}</Text>}
+        {filters.length > 0 && !filteredTotal && total > 0 && !incomplete && <Text style={{color:c.foregroundMuted}}>{t("선택한 프로젝트에 결정할 일이 없습니다.","No decisions in the selected projects.")}</Text>}
+        {pendingCount === 0 && !incomplete && <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 9, backgroundColor: "rgba(16, 185, 129, 0.08)", borderWidth: 1, borderColor: "rgba(16, 185, 129, 0.25)" }}>
+          <Text style={{ color: c.statusSuccess, flex: 1, minWidth: 180 }}>{t("✓ 지금 결정할 일이 없습니다. 바로 새 작업을 맡기거나 세션 진행을 확인하세요.", "✓ No decisions are waiting. Assign new work or check session progress.")}</Text>
+          <Button theme={theme} label={t("세션 진행 보기 ›", "View progress ›")} onPress={() => setActiveTab("kanban")} />
+        </View>}
+        {mergeNotice && inFilter(mergeNotice.projectId) && snapshot.projects.some(p => p.selected && p.id === mergeNotice.projectId) && (mergeNotice.status === "merged" || mergeNotice.status === "already-merged" ||
+          !readyPrs.some(pr => pr.repo + " #" + pr.number === mergeNotice.target)) && <MergeFeedback notice={mergeNotice} theme={theme} />}
+        {orderedKeys.map(key => <View key={key} role="article" style={{ gap: 8, padding: layout.compact ? 12 : 16, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border, borderLeftWidth: 4, borderLeftColor: c.statusDanger, borderRadius: 10 }}>
+          {scopedReceipts.filter(receipt => receipt.rowKey === key && !receipt.hidden).map(receipt =>
+            <InlineDecisionReceipt key={receipt.actionKey} receipt={receipt} theme={theme} onOpen={actions.onOpen} onDismiss={() =>
+              setInlineReceipts(prior => prior.map(entry => entry === receipt ? { ...entry, hidden: true } : entry))} />)}
+          {activeRows.get(key)}
+        </View>)}
+        {remaining > 0 && <Button theme={theme} label={t(`결정 ${remaining}건 더 보기`, `Show ${remaining} more decisions`)} onPress={() => setDigestLimit(total)} />}
+      </View>}
+  </>;
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ gap: 20, padding: layout.compact ? 12 : 22 }}>
+    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ gap: 18, padding: layout.compact ? 12 : 22 }}>
+      <View style={{ width: "100%", gap: 18 }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <View style={{ flex: 1, minWidth: 140, gap: 3 }}>
           <Text style={{ color: c.foreground, fontSize: 22, fontWeight: "700" }} accessibilityRole="header">{settings ? t("코디네이터 보드 설정", "Coordinator board settings") : t("세션별 코디네이터 보드", "Session coordinator board")}</Text>
@@ -281,11 +316,33 @@ export function BoardView({ snapshot, readiness, theme, layout, hostLabel, hostI
           setSettings(!settings); setManage(false); setPickSession(false);
         }} />
       </View>
-      {!settings && configured && byProject.size > 0 && <View accessibilityLabel={t("프로젝트 필터","Project filters")}
-        style={{flexDirection:"row", flexWrap:"wrap", alignItems:"center", gap:6}}>
-        <Button theme={theme} label={t(`전체 ${total}`,`All ${total}`)} selected={!filters.length} onPress={() => setChosenProjects([])} />
-        {[...byProject].map(([id,count]) => <Button key={JSON.stringify(id)} theme={theme} toggle selected={filters.includes(id)}
-          label={`${projectName(id)} · ${count}`} onPress={() => toggleFilter(id)} />)}
+      {!settings && configured && snapshot && <View style={{ gap: 10 }}>
+        <View accessibilityLabel={t("보드 상태 요약", "Board status summary")} style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, padding: 8, borderRadius: 9, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border }}>
+          {[
+            { label: t(`내 결정 ${pendingCount}건`, `Decisions ${pendingCount}`), color: pendingCount > 0 ? c.statusDanger : c.statusSuccess, urgent: pendingCount > 0, tab: "work" as const },
+            { label: t(`진행 중 ${runningCount}`, `Running ${runningCount}`), color: "#3b82f6", urgent: false, tab: "kanban" as const },
+            { label: t(`확인 대기 ${reviewCount}`, `Review ${reviewCount}`), color: c.statusWarning, urgent: false, tab: "kanban" as const },
+            { label: t(`결정 후속 ${historyCount}`, `Follow-up ${historyCount}`), color: "#a855f7", urgent: false, tab: "kanban" as const },
+            { label: t(`대기 중 ${idleCount}`, `Idle ${idleCount}`), color: c.foregroundMuted, urgent: false, tab: "kanban" as const },
+          ].map((item, idx) => <Pressable key={idx} accessibilityRole="button" onPress={() => setActiveTab(item.tab)}
+            style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999,
+              backgroundColor: item.urgent ? "rgba(239, 68, 68, 0.14)" : c.surface2,
+              borderWidth: 1, borderColor: item.urgent ? c.statusDanger : "transparent" }}>
+            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: item.color }} />
+            <Text style={{ fontSize: 12, fontWeight: item.urgent ? "600" : "400", color: c.foreground }}>{item.label}</Text>
+          </Pressable>)}
+        </View>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: c.border }}>
+          <View style={{ flexDirection: "row", gap: 6 }}>
+            <Button theme={theme} label={t(`작업 · 결정 (${pendingCount})`, `Work · Decisions (${pendingCount})`)} selected={activeTab === "work"} onPress={() => setActiveTab("work")} />
+            <Button theme={theme} label={t(`세션 진행 (${kanbanTotal})`, `Session progress (${kanbanTotal})`)} selected={activeTab === "kanban"} onPress={() => setActiveTab("kanban")} />
+          </View>
+          {byProject.size > 0 && <View accessibilityLabel={t("프로젝트 필터","Project filters")} style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <Button theme={theme} label={t(`전체 ${total}`,`All ${total}`)} selected={!filters.length} onPress={() => setChosenProjects([])} />
+            {[...byProject].map(([id,count]) => <Button key={JSON.stringify(id)} theme={theme} toggle selected={filters.includes(id)}
+              label={`${projectName(id)} · ${count}`} onPress={() => toggleFilter(id)} />)}
+          </View>}
+        </View>
       </View>}
       {!!error && showError && <Text selectable style={{ color: c.statusDanger }}>{error}</Text>}
       {settings && <BoardLanguageSetting theme={theme} />}
@@ -307,43 +364,29 @@ export function BoardView({ snapshot, readiness, theme, layout, hostLabel, hostI
         <BoardHosts current={{ id: hostId, label: hostLabel }} settings theme={theme} open={onOpenHostSession} />
         <BoardHosts current={{ id: hostId, label: hostLabel }} settings={false} theme={theme} open={onOpenHostSession} />
       </>}
-      <OperationsPanel settings={operationsReady && settings} theme={theme} coordinator={operationsReady ? coordinatorId ?? null : null} configured={operationsReady && !!configured}
-        refreshBoard={onRefresh} openCoordinator={actions.onOpen} />
-      {settings && snapshot && actions.onCoordinator && <View style={{ gap: 8 }}>
-        <Button theme={theme} label={pickSession ? t("기존 세션 목록 닫기", "Close session list") : t("기존 세션에서 코디네이터 지정", "Choose an existing coordinator session")} onPress={() => setPickSession(!pickSession)} />
-        {pickSession && <>
-          {snapshot.coordinator && <Button theme={theme} disabled={actions.changing} label={t("현재 코디네이터 지정 해제", "Clear current coordinator")} onPress={() => actions.onCoordinator?.(null)} />}
-          {snapshot.sessions.filter(s => s.id !== snapshot.coordinator).map(s => <Button key={s.id} theme={theme} disabled={actions.changing}
-            label={`${s.projectTitle} · ${s.title} · ${t("지정", "Assign")}`} onPress={() => actions.onCoordinator?.(s.id)} />)}
-          {!snapshot.sessions.length && <Text style={{ color: c.foregroundMuted }}>{t("관리할 프로젝트를 선택하면 지정할 수 있는 세션이 표시됩니다.", "Select a project to see its available sessions.")}</Text>}
-        </>}
-      </View>}
-      {!settings && !snapshot && !error && !!readiness?.decisionTitles?.length && <View style={{ gap: 6 }}>
-        <Text accessibilityRole="header" style={{ color: c.foreground, fontSize: 17, fontWeight: "700" }}>{t("내 결정", "My decisions")}</Text>
-        {readiness.decisionTitles.map((title, index) => <Text key={index} numberOfLines={2} style={{ color: c.foreground }}>{title}</Text>)}
-        <Text style={{ color: c.foregroundMuted }}>{t("세션과 PR 상태를 확인하고 있어요.", "Checking session and PR status…")}</Text>
-      </View>}
-      {!settings && snapshot && configured && <View style={{ gap: layout.compact ? 12 : 16 }}>
-        <Text accessibilityRole="header" style={{ color: c.foreground, fontSize: 17, fontWeight: "700" }}>{filters.length ? t(`내 결정 · ${filteredTotal}건 / 전체 ${total}건`, `My decisions · ${filteredTotal} of ${total}`) : t(`내 결정 · ${total}건`, `My decisions · ${total}`)}</Text>
-        {incomplete &&
-          <Text accessibilityLiveRegion="polite" style={{ color: c.statusWarning }}>{t("일부 결정 기록을 읽지 못했습니다. 현재 건수에는 확인한 항목만 포함됩니다.", "Some decision records could not be loaded. The count includes the available items.")}</Text>}
-        {filters.length > 0 && !filteredTotal && total > 0 && !incomplete && <Text style={{color:c.foregroundMuted}}>{t("선택한 프로젝트에 결정할 일이 없습니다.","No decisions in the selected projects.")}</Text>}
-        {total === 0 && !incomplete && <Text style={{ color: c.foregroundMuted }}>{t("지금 결정할 일이 없습니다.", "No decisions are waiting for you.")}</Text>}
-        {mergeNotice && inFilter(mergeNotice.projectId) && snapshot.projects.some(p => p.selected && p.id === mergeNotice.projectId) && (mergeNotice.status === "merged" || mergeNotice.status === "already-merged" ||
-          !readyPrs.some(pr => pr.repo + " #" + pr.number === mergeNotice.target)) && <MergeFeedback notice={mergeNotice} theme={theme} />}
-        {orderedKeys.map(key => <View key={key} role="article" style={{ gap: 8, padding: layout.compact ? 12 : 16, backgroundColor: c.surface1, borderWidth: 1, borderColor: c.border, borderRadius: 10 }}>
-          {scopedReceipts.filter(receipt => receipt.rowKey === key && !receipt.hidden).map(receipt =>
-            <InlineDecisionReceipt key={receipt.actionKey} receipt={receipt} theme={theme} onOpen={actions.onOpen} onDismiss={() =>
-              setInlineReceipts(prior => prior.map(entry => entry === receipt ? { ...entry, hidden: true } : entry))} />)}
-          {activeRows.get(key)}
-        </View>)}
-        {remaining > 0 && <Button theme={theme} label={t(`결정 ${remaining}건 더 보기`, `Show ${remaining} more decisions`)} onPress={() => setDigestLimit(total)} />}
-      </View>}
-      {!settings && configured && filteredHistory.length>0 && <View>
-        <ReplyHistory links={historyLinks} openRemote={onOpenHostSession} entries={filteredHistory} theme={theme} open={actions.onOpen} expanded={showHistory} onToggle={()=>setHistoryOpen(!showHistory)} />
-      </View>}
+      {settings || !configured || !snapshot ? <>
+        <OperationsPanel settings={operationsReady && settings} theme={theme} coordinator={operationsReady ? coordinatorId ?? null : null} configured={operationsReady && !!configured}
+          refreshBoard={onRefresh} openCoordinator={actions.onOpen} />
+        {settings && snapshot && actions.onCoordinator && <View style={{ gap: 8 }}>
+          <Button theme={theme} label={pickSession ? t("기존 세션 목록 닫기", "Close session list") : t("기존 세션에서 코디네이터 지정", "Choose an existing coordinator session")} onPress={() => setPickSession(!pickSession)} />
+          {pickSession && <>
+            {snapshot.coordinator && <Button theme={theme} disabled={actions.changing} label={t("현재 코디네이터 지정 해제", "Clear current coordinator")} onPress={() => actions.onCoordinator?.(null)} />}
+            {snapshot.sessions.filter(s => s.id !== snapshot.coordinator).map(s => <Button key={s.id} theme={theme} disabled={actions.changing}
+              label={`${s.projectTitle} · ${s.title} · ${t("지정", "Assign")}`} onPress={() => actions.onCoordinator?.(s.id)} />)}
+            {!snapshot.sessions.length && <Text style={{ color: c.foregroundMuted }}>{t("관리할 프로젝트를 선택하면 지정할 수 있는 세션이 표시됩니다.", "Select a project to see its available sessions.")}</Text>}
+          </>}
+        </View>}
+        {decisionsSection}
+      </> : activeTab === "work" ? <View style={{ gap: 20 }}>
+        {decisionsSection}
+        <View style={{ height: 1, backgroundColor: c.border }} />
+        <OperationsPanel settings={false} theme={theme} coordinator={operationsReady ? coordinatorId ?? null : null} configured={operationsReady && !!configured}
+          refreshBoard={onRefresh} openCoordinator={actions.onOpen} />
+        {filteredHistory.length > 0 && <ReplyHistory links={historyLinks} openRemote={onOpenHostSession} entries={filteredHistory} theme={theme} open={actions.onOpen} expanded={showHistory} onToggle={() => setHistoryOpen(!showHistory)} />}
+      </View> : null}
       {!settings && snapshot && !configured && !snapshot.projects.length && <Text style={{ color: c.foregroundMuted }}>{t("표시할 세션이 없습니다. 워크스페이스에서 세션을 시작하면 여기에 나타납니다.", "Start a session in a workspace to see it here.")}</Text>}
-      {!settings && configured && snapshot && <SessionProgress theme={theme} cards={visibleProjects.flatMap(project => project.cards)}
+      </View>
+      {!settings && configured && snapshot && activeTab === "kanban" && <SessionProgress theme={theme} cards={visibleCards}
         peers={visiblePeers} peersLoading={peersLoading} hostLabel={hostLabel} projectName={projectName} open={actions.onOpen} openRemote={onOpenHostSession}>
         {!visibleProjects.length && !showHostWide && <Text style={{ color: c.foregroundMuted }}>{t("표시할 세션이 없습니다.", "No sessions to show.")}</Text>}
         {showHostWide && <Project historyLinks={historyLinks} openRemote={onOpenHostSession} projectId="" title={t("공통","Host-wide")} cards={[]} requests={[]} history={history.filter(entry=>entry.projectId === null)}

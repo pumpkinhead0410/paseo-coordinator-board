@@ -60,7 +60,7 @@ export function ReplyCard({entry, theme, links, open, openRemote}:Props) {
   const [showOrigin,setShowOrigin] = useState(false);
   const [photoIndex,setPhotoIndex] = useState<number | null>(null);
   const origin = entry.origin;
-  const long = [entry.answer,entry.response].some(text => text && (text.length > 160 || text.split("\n").length > 3));
+  const long = [entry.answer,entry.response].some(text => text && (text.length > 320 || text.split("\n").length > 6));
   const merge = entry.pullMerge;
   const status = merge
     ? (merge.status === "merged" ? t("보드에서 병합함", "Merged from board") : t("이미 병합됨", "Already merged"))
@@ -78,7 +78,7 @@ export function ReplyCard({entry, theme, links, open, openRemote}:Props) {
     {merge ? <>
       <Text selectable style={{color:colors.foreground,fontWeight:"600"}}>{entry.title}</Text>
       <HistoryMarkdown theme={theme} source={`[${merge.repo} #${merge.number}](${pullUrl(merge.repo,merge.number)})`} />
-    </> : <HistoryMarkdown theme={theme} source={entry.title} heading />}
+    </> : <HistoryMarkdown theme={theme} source={entry.title} />}
     <Text selectable style={{color:colors.foregroundMuted,fontSize:12}}>{[status, mergeNotificationLabel(merge?.notification, t), date, merge?.mergeSha?.slice(0, 12)].filter(Boolean).join(" · ")}</Text>
     {!!sessions.length && <View style={{flexDirection:"row",flexWrap:"wrap",gap:5}}>{sessions.map(session =>
       <SessionReference key={JSON.stringify([session.role,session.host,session.id])} session={session} state={session.state && states[session.state]}
@@ -96,7 +96,7 @@ export function ReplyCard({entry, theme, links, open, openRemote}:Props) {
       </>}
     </View>}
     {entry.status === "sent" && (entry.response
-      ? <View style={{gap:3}}>
+      ? <View style={{gap:4,marginTop:2,paddingVertical:8,paddingHorizontal:10,borderRadius:6,backgroundColor:colors.surface1,borderLeftWidth:3,borderLeftColor:"#3b82f6"}}>
           <Text style={{color:colors.foregroundMuted,fontSize:12}}>{t("세션의 후속 응답","Session follow-up")}</Text>
           <HistoryMarkdown theme={theme} source={entry.response} preview={long && !full} />
         </View>

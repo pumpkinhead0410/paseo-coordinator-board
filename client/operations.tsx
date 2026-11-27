@@ -1,7 +1,7 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { SendButton, SendTextInput } from "./send-input";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Text, useWindowDimensions, View } from "react-native";
+import { Pressable, Text, useWindowDimensions, View } from "react-native";
 import {
   askDigest,
   operationState,
@@ -48,6 +48,7 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
   const [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [text, setText] = useState("");
+  const [composerOpen, setComposerOpen] = useState(false);
   const [editorExpanded, setEditorExpanded] = useState(false);
   const { height: windowHeight } = useWindowDimensions();
   const photoDraft = usePhotoDraft();
@@ -162,6 +163,7 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
       delivery.current[kind] = { payload: "", key: "" };
       if (kind === "work") {
         setText("");
+        setComposerOpen(false);
         setEditorExpanded(false);
         photoDraft.clear();
       }
@@ -258,12 +260,15 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
       <Text accessibilityRole="header" style={heading}>{t("코디네이터", "Coordinator")}</Text>
       {coordinator && openCoordinator && <SessionChip theme={theme} label={t("코디네이터 세션", "Coordinator session")} accessibilityLabel={t("코디네이터 세션 열기", "Open coordinator session")} onPress={() => openCoordinator(coordinator)} />}
     </View>
-    {coordinator ? <>
+    {coordinator ? (composerOpen || hasRequest ? <>
       <View style={{ ...wrap, alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color, fontWeight: "600" }}>{t("코디네이터에게 맡길 일", "Request for the coordinator")}</Text>
-        <Button theme={theme} expanded={editorExpanded}
-          label={editorExpanded ? t("입력창 접기", "Collapse editor") : t("입력창 펼치기", "Expand editor")}
-          onPress={() => setEditorExpanded(expanded => !expanded)} />
+        <Text style={{ color, fontWeight: "500" }}>{t("코디네이터에게 맡길 일", "Request for the coordinator")}</Text>
+        <View style={wrap}>
+          <Button theme={theme} expanded={editorExpanded}
+            label={editorExpanded ? t("입력창 작게", "Compact editor") : t("입력창 펼치기", "Expand editor")}
+            onPress={() => setEditorExpanded(expanded => !expanded)} />
+          {!hasRequest && <Button theme={theme} label={t("접기", "Hide")} onPress={() => { setComposerOpen(false); setEditorExpanded(false); }} />}
+        </View>
       </View>
       <PhotoComposer theme={theme} disabled={busy} draft={photoDraft} text={text} showHint
         openSession={openCoordinator ? () => openCoordinator(coordinator) : undefined}>
@@ -279,7 +284,15 @@ export function OperationsPanel({ theme, settings, coordinator, configured, refr
         <Button theme={theme} label={t("다이제스트 요청", "Request digest")} disabled={busy || photoDraft.reading || !configured} onPress={() => void post("digest")} />
       </View>
       <Text style={{ color: muted }}>{!configured ? t("설정에서 관리할 프로젝트를 선택해 주세요.", "Choose a project to manage in Settings.") : t("작업 요청은 코디네이터에게 전달됩니다. 다이제스트는 내 결정과 추천 답장을 모읍니다. 자동 답장이 켜져 있으면 보드에서 확인한 사실 질문도 처리합니다.", "Requests go to the coordinator. A digest gathers decisions and suggested replies. When automatic replies are on, it also answers verified board questions.")}</Text>
-    </> : <>
+    </> : <View style={{ ...wrap, alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+      <Pressable accessibilityRole="button" accessibilityLabel={t("코디네이터에게 새 작업 맡기기", "Assign new work to coordinator")}
+        onPress={() => setComposerOpen(true)}
+        style={{ flex: 1, minWidth: 200, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 7, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
+        <Text style={{ color: muted }}>{t("코디네이터에게 새 작업 맡기기… (클릭해 입력창 열기)", "Assign new work to the coordinator… (tap to open)")}</Text>
+      </Pressable>
+      <Button theme={theme} label={t("입력창 열기", "Open editor")} onPress={() => setComposerOpen(true)} />
+      <Button theme={theme} label={t("다이제스트 요청", "Request digest")} disabled={busy || photoDraft.reading || !configured} onPress={() => void post("digest")} />
+    </View>) : <>
       <Text style={{ color: muted }}>{loading ? t("사용할 수 있는 모델을 확인하고 있습니다.", "Checking available models\u2026") :
         model ? t(`연결된 모델로 운영 세션을 만듭니다 · ${routeName(model, t)}`, `Create a coordinator session with ${routeName(model, t)}`) :
         data ? missingModel : t("설정에서 실행기와 모델을 새로 고쳐 주세요.", "Refresh providers and models in Settings.")}</Text>

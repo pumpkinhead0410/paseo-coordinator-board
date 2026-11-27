@@ -17,10 +17,19 @@ type Actions = { sessionHostLabel?: string; onOpen?: (id:string) => void; onEdit
 
 function accent(lane: ColumnKind, theme: Theme) {
   const c = theme.colors;
-  if (lane === "human") return c.statusWarning;
-  if (lane === "running") return c.accent;
+  if (lane === "human") return c.statusDanger;
+  if (lane === "review") return c.statusWarning;
+  if (lane === "running") return "#3b82f6";
+  if (lane === "history") return "#a855f7";
   if (lane === "done") return c.statusSuccess;
   return c.foregroundMuted;
+}
+
+function withAlpha(color: string, alpha: number, fallback: string): string {
+  const hex = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!hex) return fallback;
+  const n = parseInt(hex[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
 function CardView({ card, theme, onOpen, onEdit, sessionHostLabel }: { card: Card; theme: Theme } & Actions) {
@@ -41,7 +50,7 @@ function CardView({ card, theme, onOpen, onEdit, sessionHostLabel }: { card: Car
         accessibilityLabel={t(`${session.title} · ${expanded ? "상세 접기" : "상세 보기"}`, `${session.title} · ${expanded ? "Hide details" : "View details"}`)}
         onPress={() => setExpanded(value => !value)} style={{ gap: 3 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-          <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600", flex: 1 }}>{session.title}</Text>
+          <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "500", flex: 1 }}>{session.title}</Text>
           <Text accessible={false} style={{ color: c.foregroundMuted }}>{expanded ? "▴" : "▾"}</Text>
         </View>
         <Text numberOfLines={1} style={{ color: c.foregroundMuted, fontSize: 12 }}>
@@ -96,10 +105,11 @@ function Column({lane,entries,theme}: {lane:ColumnKind;entries:Entry[];theme:The
   const {t} = useBoardLanguage();
   const [limit,setLimit] = useState(4);
   const c=theme.colors;
+  const color = accent(lane, theme);
   return <View style={{padding:8,borderRadius:8,backgroundColor:c.surface1,borderColor:c.border,borderWidth:1,gap:7}}>
-    <View style={{flexDirection:"row",alignItems:"center",gap:6}}>
-      <View style={{width:7,height:7,borderRadius:4,backgroundColor:accent(lane,theme)}} />
-      <Text accessibilityRole="header" style={{color:c.foreground,flex:1,fontWeight:"600"}}>{lane === "history" ? t("결정 후속","Decision follow-up") : laneLabel(lane,t)}</Text>
+    <View style={{flexDirection:"row",alignItems:"center",gap:8,paddingHorizontal:8,paddingVertical:6,borderRadius:6,backgroundColor:withAlpha(color,0.14,c.surface2)}}>
+      <View style={{width:10,height:10,borderRadius:5,backgroundColor:color}} />
+      <Text accessibilityRole="header" style={{color:c.foreground,flex:1,fontWeight:"500"}}>{lane === "history" ? t("결정 후속","Decision follow-up") : laneLabel(lane,t)}</Text>
       <Text style={{color:c.foregroundMuted}}>{entries.length}</Text>
     </View>
     {entries.slice(0,limit).map(entry=><View key={entry.key}>{entry.content}</View>)}
@@ -131,9 +141,11 @@ export function Project({projectId,title,decisions,cards,records,history=[],hist
     groups[lane].push({key:pr.url,content:renderPull(pr,projectId)});
   }
   const lanes=order.filter(lane=>groups[lane].length);
-  const stacked = width ? width<490 : compact;
+  const stacked = width ? width < 540 : compact;
+  const colsPerRow = stacked ? 1 : width < 960 ? Math.min(lanes.length, 2) : Math.min(lanes.length, 4);
+  const colWidth = width && colsPerRow > 1 ? Math.floor((width - (colsPerRow - 1) * COLUMN_GAP) / colsPerRow) : undefined;
   const running=cards.filter(card=>card.lane==="running").length;
-  const columns=lanes.map(lane=><View key={lane} style={stacked ? {width:"100%"} : {width:columnWidth(width,lanes.length)}}>
+  const columns=lanes.map(lane=><View key={lane} style={stacked ? {width:"100%"} : colWidth ? {width:colWidth} : {flex:1,minWidth:220}}>
     <Column lane={lane} entries={groups[lane]} theme={theme} />
   </View>);
   return <View style={{gap:8}} onLayout={e=>setWidth(e.nativeEvent.layout.width)}>
@@ -142,6 +154,6 @@ export function Project({projectId,title,decisions,cards,records,history=[],hist
       {t(`세션 ${cards.length}개 · 진행 중인 세션 ${running}개 · 내 결정 ${decisions}건`,`Sessions ${cards.length} · Running sessions ${running} · My decisions ${decisions}`)}
     </Text>
     {stacked ? <View style={{gap:COLUMN_GAP}}>{columns}</View> :
-      <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{gap:COLUMN_GAP,paddingBottom:5,alignItems:"flex-start"}}>{columns}</ScrollView>}
+      <View style={{flexDirection:"row",flexWrap:"wrap",gap:COLUMN_GAP,alignItems:"flex-start"}}>{columns}</View>}
   </View>;
 }
