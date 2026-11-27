@@ -993,6 +993,31 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     text: "#308 완료",
     receipt: validReceipt,
   })).rejects.toThrow(/종료 커밋 정보를 확인할 수 없어/);
+
+  // 8. ANY prior `review` judgment (regardless of wording like "최종 점검 결과 대조 필요" and even without an active agent-note) MUST reject receipt-less `idle` and `withdrawn`!
+  await run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "review",
+    text: "최종 점검 결과 대조 필요",
+  });
+  w308.updatedAt = "2026-11-26T07:05:00Z";
+  timelines.get("w308")!.push("#308 통합 결과의 검증 자료가 아직 도착하지 않았습니다.");
+  const unverifiedReviewEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: unverifiedReviewEv.evidenceId,
+    kind: "idle",
+    text: "남은 일 없음",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: unverifiedReviewEv.evidenceId,
+    kind: "idle",
+    text: "남은 일 없음",
+    receipt: { kind: "withdrawn", targetEvidenceId: ev.evidenceId, reason: "검증 대기 철회" },
+  })).rejects.toThrow(/검증 대기\(review\)/);
+  expect(prefs.read().judgments.w308.kind).toBe("review");
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

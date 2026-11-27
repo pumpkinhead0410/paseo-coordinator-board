@@ -24,17 +24,28 @@ const plan = await plan_board_assignment({});
 const rows = await read_board_conversation({});
 // rows[i]: { id, projectId, workspaceId, workspaceTitle, title, status, activityAt,
 //            judgment?: { kind: "review", evidenceId: "..." },
-//            note?: { kind: "review", origin: "agent" } }
+//            note?: { kind: "review", origin: "agent", revision: 1, evidenceId: "..." } }
 
 // 실행 중인 세션에 classify_board_conversation을 호출하면 재시도 지침이 포함된 오류를 반환
 // → "실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요."
-// 세션이 idle로 전환된 뒤 최신 발췌를 다시 읽고 검증 영수증·커밋·GitHub 종료 사유·정리 인계를 구분해 분류
+// 세션이 idle로 전환된 뒤 최신 발췌를 다시 읽고 구조화 완료 영수증(receipt)으로 원격 main·GitHub 종료 커밋·CI 통과를 검증해 분류
+// (GitHub CI 체크가 없는 저장소에서는 자동 idle 전환을 거절하고 review를 유지해 사람이 직접 확인·완료 기록(saveNote)합니다.)
 const latest = await read_board_conversation({ sessionId: "cefb9a46..." });
 await classify_board_conversation({
   sessionId: "cefb9a46...",
   evidenceId: latest.evidenceId,
   kind: "idle",
-  text: "#308 cf6f661 원격 main 통합·최종검증·GitHub COMPLETED 확인. workspace 정리 인계는 별도 보존·사용 종료 대기.",
+  text: "#308 cf6f661 원격 main 통합·CI 통과·GitHub COMPLETED 확인. workspace 정리 인계는 별도 보존·사용 종료 대기.",
+  receipt: {
+    kind: "completed",
+    repo: "owner/easydocs",
+    issue: 308,
+    commit: "cf6f661",
+    verifiedCommit: "cf6f661",
+    verification: { source: "ci", status: "passed", summary: "GitHub Actions 통과" },
+    closeReason: "COMPLETED",
+    cleanupHandoff: "workspace 정리 인계는 별도 보존·사용 종료 대기.",
+  },
 });
 ```
 
@@ -143,6 +154,9 @@ await classify_board_conversation({
   2. `local` 검증의 자유 문장 정규식 대조를 제거하고 `receiptPath` 필드와 `OutcomeVerifier.verifyLocalReceipt`를 도입했습니다.
 - **2026-11-27 (독립 의도 리뷰 21차 `c393178` 지적 1건 반영 — 미인증 로컬 JSON 자동 해제 제거)**:
   - 워크스페이스에 임의로 작성한 미서명 JSON 파일로는 실제 명령 실행 여부를 증명할 수 없으므로, `classify_board_conversation`의 자동 `idle` 해제는 원격 GitHub 체크 통과(`commitOutcome.checks === "passed"`)만 허용하도록 fail-closed 단순화했습니다(`server/preferences.ts`, `server/coordinator.ts`, `server/outcome-verifier.ts`). CI 체크가 없는 저장소에서는 `review` 상태를 유지하고 사람이 직접 확인·완료 기록(`saveNote`)하는 경로를 따릅니다(기존 저장된 `source: "local"` 기록은 `storedVerificationSchema`로 호환 읽기 유지).
+- **2026-11-27 (독립 의도 리뷰 22차 `363e5fa` 지적 2건 반영)**:
+  1. `server/coordinator.ts`에서 `previousKind === "review"`의 문구 매칭 필터(`integrationReviewContextPattern`)를 제거해, 기존 판단이 어떤 문구의 `review` 대기이든(예: “최종 점검 결과 대조 필요”) 활성 작업자 보고 유무나 입력 문구(“남은 일 없음”)와 무관하게 영수증 없이 `idle`로 해제할 수 없도록 fail-closed 일원화했습니다.
+  2. 이 문서의 Usage `#308` 예제를 현재 도구 계약에 맞춰 필수 완료 `receipt`와 CI 미확인 시 사람 확인(`review` 유지 → `saveNote`) 경로까지 함께 명시하도록 동기화했습니다.
 
 ## Acceptance criteria
 

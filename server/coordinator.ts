@@ -10,7 +10,6 @@ import { isManagedCoordinator, judgment, PreferenceStore, type CompletionReceipt
 import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
-const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
 const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
 const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
 const separateTaskWithdrawalPattern = /(?:별도(?:의)?|별개(?:의)?|다른\s*(?:작업|요청|안건|이슈)|무관한|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
@@ -169,12 +168,12 @@ export async function verifyIdleClassification(
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
   const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
-  const hasIntegrationReviewWait =
-    (context.previousKind === "review" && integrationReviewContextPattern.test(context.previousText ?? "")) ||
+  const hasReviewWait =
+    context.previousKind === "review" ||
     (context.hasActiveAgentNote && context.activeNoteKind === "review");
   const hasOpenQuestion =
     context.previousKind === "question" || (context.hasActiveAgentNote && context.activeNoteKind === "question");
-  const requiresReceipt = !!input.receipt || hasIntegrationReviewWait || context.hasActiveAgentNote || claimsCompletion;
+  const requiresReceipt = !!input.receipt || hasReviewWait || context.hasActiveAgentNote || claimsCompletion;
 
   const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
   const proseAnchorIssues = extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
@@ -192,7 +191,7 @@ export async function verifyIdleClassification(
     context.previousKind === "question" ? context.previousNeedsInput ?? "" : "",
   ].join(" ");
 
-  if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasIntegrationReviewWait && !claimsCompletion) {
+  if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasReviewWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
       return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
     }
@@ -231,8 +230,8 @@ export async function verifyIdleClassification(
   }
 
   if (receipt.kind === "withdrawn") {
-    if (hasIntegrationReviewWait || claimsCompletion) {
-      return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
+    if (hasReviewWait || claimsCompletion) {
+      return "검증 대기(review)나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
     if (context.hasActiveAgentNote && context.activeNoteEvidenceId && receipt.targetEvidenceId !== context.activeNoteEvidenceId) {
       return `철회 영수증의 targetEvidenceId(${receipt.targetEvidenceId})가 열린 보고의 근거(${context.activeNoteEvidenceId})와 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
