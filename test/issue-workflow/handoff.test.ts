@@ -36,7 +36,11 @@ type MockAgent = {
   pendingPermissions: { id: string }[];
 };
 
-async function openIssueBoard(options: { onVerifyIssue?: () => void; onWorkspaceRefresh?: (count: number) => void } = {}) {
+async function openIssueBoard(options: {
+  onVerifyIssue?: () => void;
+  onWorkspaceRefresh?: (count: number) => void;
+  onAgentsList?: (count: number) => void;
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "board-issue-workflow-"));
   dirs.push(dir);
   const prefs = new PreferenceStore(join(dir, "scope.json"));
@@ -99,6 +103,7 @@ async function openIssueBoard(options: { onVerifyIssue?: () => void; onWorkspace
   };
 
   let wsRefreshCount = 0;
+  let agentsListCount = 0;
   const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
   const sdk = {
     projects: {
@@ -117,7 +122,11 @@ async function openIssueBoard(options: { onVerifyIssue?: () => void; onWorkspace
       }),
     },
     agents: {
-      list: async () => page(agents.map(agent => ({ agent, project: { projectKey: "easydocs", projectName: "EasyDocs" } }))),
+      list: async () => {
+        agentsListCount += 1;
+        options.onAgentsList?.(agentsListCount);
+        return page(agents.map(agent => ({ agent, project: { projectKey: "easydocs", projectName: "EasyDocs" } })));
+      },
       ref: (id: string) => ({
         timeline: {
           refetch: async () => ({
@@ -484,6 +493,18 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     receipt: { kind: "withdrawn", reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
+  // Separate-task withdrawal while the original decision is still needed is also rejected fail-closed!
+  w305.updatedAt = "2026-11-26T06:38:00Z";
+  timelines.get("w305")!.push("별도 문서 작업 요청의 철회를 확인했습니다. H1 판단은 여전히 필요합니다.");
+  const separateWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: separateWithdraw305.evidenceId,
+    kind: "idle",
+    text: "#305 철회",
+    receipt: { kind: "withdrawn", reason: "임의 철회" },
+  })).rejects.toThrow(/철회·취소 근거/);
+
   // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
   w305.updatedAt = "2026-11-26T06:40:00Z";
   timelines.get("w305")!.push("사용자 요청 철회를 확인했습니다. 2단계 자료 대기 없이 대기합니다.");
@@ -558,6 +579,18 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/aabbccd000000000000000000000000000000000/status?per_page=100&page=1") {
       return JSON.stringify({ state: "success", total_count: 0, statuses: [] });
     }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/badc0de") {
+      return "badc0de000000000000000000000000000000000\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...badc0de000000000000000000000000000000000") {
+      return "behind\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/badc0de000000000000000000000000000000000/check-runs?per_page=100&page=1") {
+      return JSON.stringify({ total_count: 1, check_runs: [{ status: "completed", conclusion: "failure" }] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/badc0de000000000000000000000000000000000/status?per_page=100&page=1") {
+      throw new Error("status endpoint unavailable");
+    }
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/deadbee") {
       throw new Error("Not Found");
     }
@@ -578,6 +611,12 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     onMain: false,
     checks: "unavailable",
   });
+  // Observed FAILURE in check-runs MUST stay "failed" even if the sibling status endpoint errors!
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "badc0de")).toEqual({
+    onMain: true,
+    resolvedSha: "badc0de000000000000000000000000000000000",
+    checks: "failed",
+  });
   // Incomplete check-runs pagination (total_count: 31, only 30 received) fails closed as unavailable!
   expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "aabbccd")).toEqual({
     onMain: true,
@@ -592,14 +631,16 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
   expect(calls.every(c => c.startsWith("gh "))).toBe(true);
 });
 
-test("classify_board_conversation rejects unanchored receipts and mid-verification TOCTOU (new report, remote change, or resume during final refresh)", async () => {
+test("classify_board_conversation rejects unanchored receipts and mid-verification TOCTOU (new report, remote change, resume, or new turn during final check)", async () => {
   let midVerifyAction: (() => void) | undefined;
   let finalRefreshAction: (() => void) | undefined;
+  let finalListAction: (() => void) | undefined;
   const { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, run } = await openIssueBoard({
     onVerifyIssue: () => midVerifyAction?.(),
     onWorkspaceRefresh: (count) => {
       if (count % 2 === 0) finalRefreshAction?.();
     },
+    onAgentsList: () => finalListAction?.(),
   });
   const w308 = agents.find(a => a.id === "w308")!;
   issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
@@ -663,7 +704,26 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   w308.status = "idle";
   finalRefreshAction = undefined;
 
-  // 4. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
+  // 4. New turn arriving during the final agents.list status check MUST abort idle classification!
+  let listCalls = 0;
+  finalListAction = () => {
+    listCalls += 1;
+    if (listCalls === 2) {
+      timelines.get("w308")!.push("최종 상태 조회 중 새 발화가 도착했습니다.");
+    }
+  };
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/대화가 바뀌었습니다|세션 갱신 시점이 바뀌었습니다/);
+  expect(prefs.read().judgments.w308).toBeUndefined();
+  finalListAction = undefined;
+  timelines.get("w308")!.pop();
+
+  // 5. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
   midVerifyAction = () => {
     workspaces[1].gitRuntime.remoteUrl = "https://github.com/other/EasyDocs.git";
   };

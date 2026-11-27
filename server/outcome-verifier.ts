@@ -148,25 +148,27 @@ async function fetchAllCheckRuns(
 ): Promise<{ runs: { status?: string | null; conclusion?: string | null }[]; complete: boolean }> {
   const runs: { status?: string | null; conclusion?: string | null }[] = [];
   let expectedTotal: number | undefined;
-  for (let page = 1; page <= maxCheckPages; page += 1) {
-    const endpoint = page === 1
-      ? `repos/${repo}/commits/${resolvedSha}/check-runs?per_page=100&page=1`
-      : `repos/${repo}/commits/${resolvedSha}/check-runs?per_page=100&page=${page}`;
-    const raw = await runner("gh", ["api", endpoint]);
-    const parsed = rawCheckRuns.parse(JSON.parse(raw));
-    if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
-    runs.push(...parsed.check_runs);
-    if (expectedTotal !== undefined && runs.length >= expectedTotal) {
-      return { runs, complete: true };
+  try {
+    for (let page = 1; page <= maxCheckPages; page += 1) {
+      const endpoint = `repos/${repo}/commits/${resolvedSha}/check-runs?per_page=100&page=${page}`;
+      const raw = await runner("gh", ["api", endpoint]);
+      const parsed = rawCheckRuns.parse(JSON.parse(raw));
+      if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
+      runs.push(...parsed.check_runs);
+      if (expectedTotal !== undefined && runs.length >= expectedTotal) {
+        return { runs, complete: true };
+      }
+      if (parsed.check_runs.length === 0) {
+        return { runs, complete: expectedTotal === undefined || runs.length >= expectedTotal };
+      }
+      if (expectedTotal === undefined && parsed.check_runs.length < 100) {
+        return { runs, complete: true };
+      }
     }
-    if (parsed.check_runs.length === 0) {
-      return { runs, complete: expectedTotal === undefined || runs.length >= expectedTotal };
-    }
-    if (expectedTotal === undefined && parsed.check_runs.length < 100) {
-      return { runs, complete: true };
-    }
+    return { runs, complete: expectedTotal !== undefined && runs.length >= expectedTotal };
+  } catch {
+    return { runs, complete: false };
   }
-  return { runs, complete: expectedTotal !== undefined && runs.length >= expectedTotal };
 }
 
 async function fetchAllCommitStatuses(
@@ -176,23 +178,27 @@ async function fetchAllCommitStatuses(
 ): Promise<{ statuses: { state?: string | null }[]; complete: boolean }> {
   const statuses: { state?: string | null }[] = [];
   let expectedTotal: number | undefined;
-  for (let page = 1; page <= maxCheckPages; page += 1) {
-    const endpoint = `repos/${repo}/commits/${resolvedSha}/status?per_page=100&page=${page}`;
-    const raw = await runner("gh", ["api", endpoint]);
-    const parsed = rawCommitStatus.parse(JSON.parse(raw));
-    if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
-    statuses.push(...parsed.statuses);
-    if (expectedTotal !== undefined && statuses.length >= expectedTotal) {
-      return { statuses, complete: true };
+  try {
+    for (let page = 1; page <= maxCheckPages; page += 1) {
+      const endpoint = `repos/${repo}/commits/${resolvedSha}/status?per_page=100&page=${page}`;
+      const raw = await runner("gh", ["api", endpoint]);
+      const parsed = rawCommitStatus.parse(JSON.parse(raw));
+      if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
+      statuses.push(...parsed.statuses);
+      if (expectedTotal !== undefined && statuses.length >= expectedTotal) {
+        return { statuses, complete: true };
+      }
+      if (parsed.statuses.length === 0) {
+        return { statuses, complete: expectedTotal === undefined || statuses.length >= expectedTotal };
+      }
+      if (expectedTotal === undefined && parsed.statuses.length < 100) {
+        return { statuses, complete: true };
+      }
     }
-    if (parsed.statuses.length === 0) {
-      return { statuses, complete: expectedTotal === undefined || statuses.length >= expectedTotal };
-    }
-    if (expectedTotal === undefined && parsed.statuses.length < 100) {
-      return { statuses, complete: true };
-    }
+    return { statuses, complete: expectedTotal !== undefined && statuses.length >= expectedTotal };
+  } catch {
+    return { statuses, complete: false };
   }
-  return { statuses, complete: expectedTotal !== undefined && statuses.length >= expectedTotal };
 }
 
 async function lookupCommitChecks(
@@ -200,18 +206,14 @@ async function lookupCommitChecks(
   resolvedSha: string,
   runner: (command: "git" | "gh", args: string[]) => Promise<string>,
 ): Promise<CommitCheckStatus> {
-  try {
-    const [runsResult, statusResult] = await Promise.all([
-      fetchAllCheckRuns(repo, resolvedSha, runner),
-      fetchAllCommitStatuses(repo, resolvedSha, runner),
-    ]);
-    const summary = summarizeCommitChecks(runsResult.runs, statusResult.statuses);
-    if (summary === "failed" || summary === "pending") return summary;
-    if (!runsResult.complete || !statusResult.complete) return "unavailable";
-    return summary;
-  } catch {
-    return "unavailable";
-  }
+  const [runsResult, statusResult] = await Promise.all([
+    fetchAllCheckRuns(repo, resolvedSha, runner),
+    fetchAllCommitStatuses(repo, resolvedSha, runner),
+  ]);
+  const summary = summarizeCommitChecks(runsResult.runs, statusResult.statuses);
+  if (summary === "failed" || summary === "pending") return summary;
+  if (!runsResult.complete || !statusResult.complete) return "unavailable";
+  return summary;
 }
 
 export function createOutcomeVerifier(

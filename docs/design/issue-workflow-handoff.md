@@ -110,6 +110,10 @@ await classify_board_conversation({
   1. `server/outcome-verifier.ts`에서 `check-runs`·`status` 조회를 `per_page=100` 페이지네이션으로 모두 읽고, `total_count`보다 적게 수집된 불완전 응답은 `unavailable`로 fail-closed 처리하도록 수정했습니다.
   2. `server/coordinator.ts`에서 대상 이슈 앵커 수집에서 최신 종결 턴(`last`)을 제외해 최신 발췌의 타 이슈(“다른 작업 #999”)가 앵커로 채택되지 않도록 하고, `withdrawn`에 `tentativeOrNegatedWithdrawalPattern`을 추가해 “철회 여부를 확인 중입니다” 같은 검토·미확인 발췌를 차단했습니다.
   3. `server/coordinator.ts`에서 최종 `wsAfter.refresh()`와 `latestAfter` 확인을 마지막 `managedRowsForCoordinator` 상태 확인보다 앞으로 옮겨, 워크스페이스 재조회 도중 세션이 `running`으로 재개되면 저장을 거절하도록 TOCTOU 순서를 바로잡았습니다.
+- **2026-11-27 (독립 의도 리뷰 12차 `14272eb7` 지적 3건 반영)**:
+  1. `server/outcome-verifier.ts`에서 `fetchAllCheckRuns`·`fetchAllCommitStatuses`가 각각 오류를 격리해 수집된 관측 결과를 보존하도록 변경해, `check-runs`에서 확인된 `FAILURE`가 `status` 조회 오류 때문에 `unavailable`로 가려지지 않고 `failed`를 우선 반환하도록 수정했습니다.
+  2. `server/coordinator.ts`에 `hasConfirmedWithdrawalForTarget`·`separateTaskWithdrawalPattern`·`remainingNeedPattern`을 추가해 “별도 문서 작업 요청의 철회를 확인했습니다. H1 판단은 여전히 필요합니다”처럼 별도 작업 철회나 남은 판단 필요가 포함된 발췌가 열린 질문을 해소하지 못하도록 차단했습니다.
+  3. `server/coordinator.ts`에서 최종 `rowsAfter`의 `activityAt` 일치를 검증하고 그 직후 `latestAfter`를 다시 대조해, 마지막 상태 조회 도중 새 발화가 추가되면 `idle` 저장을 거절하도록 강화했습니다.
 
 ## Acceptance criteria
 
