@@ -29,8 +29,10 @@ function hasRemainingHumanNeed(lastText: string): boolean {
   });
 }
 
-const questionAnswerSchema = z.object({questionEvidenceId: z.string().min(1), replyId: z.string().min(1)});
+const questionAnswerSchema = z.object({questionEvidenceId: z.string().min(1), replyId: z.string().min(1), noteRevision: z.number().int().positive().optional()});
 type QuestionAnswer = z.infer<typeof questionAnswerSchema>;
+const questionAnswersSchema = z.union([questionAnswerSchema, z.array(questionAnswerSchema).min(1).max(3)]);
+type QuestionAnswers = z.infer<typeof questionAnswersSchema>;
 
 function isOpenQuestionResolved(
   latest: Evidence,
@@ -40,9 +42,10 @@ function isOpenQuestionResolved(
   openQuestionText: string,
   evidenceId: string | undefined,
   answer?: QuestionAnswer,
+  allowWithdrawal = true,
 ): boolean {
   if (hasRemainingHumanNeed(lastText)) return false;
-  if (hasConfirmedWithdrawalForTarget(lastText, anchoredIssues, openQuestionText)) return true;
+  if (allowWithdrawal && hasConfirmedWithdrawalForTarget(lastText, anchoredIssues, openQuestionText)) return true;
   if (!answer || !evidenceId || answer.questionEvidenceId !== evidenceId) return false;
   // Older reports have no saved cursor. Recover only an exact visible evidence boundary.
   cursor ??= latest.evidencePositions?.get(evidenceId);
@@ -229,7 +232,7 @@ function hasPriorVerificationWait(context: {
 
 export async function verifyIdleClassification(
   latest: Evidence,
-  input: { text: string; receipt?: CompletionReceipt; questionAnswer?: QuestionAnswer },
+  input: { text: string; receipt?: CompletionReceipt; questionAnswer?: QuestionAnswers },
   context: {
     previousKind?: "question" | "review" | "idle";
     previousReviewKind?: "general" | "verification";
@@ -282,27 +285,29 @@ export async function verifyIdleClassification(
     hasActiveAgentNote: context.hasActiveAgentNote,
     hasAnchoredIssue,
   });
-  const hasOpenQuestion =
-    context.previousKind === "question" ||
-    !!context.previousOpenQuestion ||
-    (context.hasActiveAgentNote && context.activeNoteKind === "question");
+  const questions: { evidenceId?: string; cursor?: string; text: string; noteRevision?: number }[] = [];
+  if (context.previousOpenQuestion) questions.push(context.previousOpenQuestion);
+  if (context.previousKind === "question") questions.push({
+    evidenceId: context.previousEvidenceId, cursor: context.previousQuestionCursor,
+    text: [context.previousText, context.previousQuestion, context.previousNeedsInput].filter(Boolean).join(" "),
+  });
+  if (context.hasActiveAgentNote && context.activeNoteKind === "question") questions.push({
+    evidenceId: context.activeNoteEvidenceId, cursor: context.activeNoteCursor,
+    text: context.activeNoteText ?? "", noteRevision: context.activeNoteRevision,
+  });
+  const answers = input.questionAnswer ? [input.questionAnswer].flat() : [];
+  const hasOpenQuestion = questions.length > 0;
+  const openQuestionText = questions.map(q => q.text).join(" ");
+  const priorQuestionEvidenceId = questions.at(-1)?.evidenceId;
   const requiresReceipt = !!input.receipt || hasVerificationWait || claimsCompletion;
-
-  const openQuestionText = [
-    context.activeNoteKind === "question" ? context.activeNoteText ?? "" : "",
-    context.previousKind === "question" ? context.previousText ?? "" : "",
-    context.previousKind === "question" ? context.previousQuestion ?? "" : "",
-    context.previousKind === "question" ? context.previousNeedsInput ?? "" : "",
-    context.previousOpenQuestion?.text ?? "",
-  ].join(" ");
-  const priorQuestionEvidenceId = context.activeNoteKind === "question"
-    ? context.activeNoteEvidenceId
-    : context.previousKind === "question"
-      ? context.previousEvidenceId
-      : context.previousOpenQuestion?.evidenceId;
-  const openQuestionCursor = context.activeNoteKind === "question" ? context.activeNoteCursor : context.previousKind === "question"
-    ? context.previousQuestionCursor
-    : context.previousOpenQuestion?.cursor;
+  const allResolved = () => questions.every(question => {
+    const answer = answers.find(candidate => candidate.questionEvidenceId === question.evidenceId &&
+      (candidate.noteRevision === question.noteRevision || (questions.length === 1 && candidate.noteRevision === undefined)));
+    // A withdrawal in a completion summary cannot identify which of several questions it cancels.
+    if (questions.length > 1 && !answer) return false;
+    return isOpenQuestionResolved(latest, last!.text, question.cursor, anchoredIssues, question.text, question.evidenceId, answer,
+      questions.length === 1);
+  });
 
   if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
@@ -311,6 +316,8 @@ export async function verifyIdleClassification(
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
     }
+    if (!input.receipt && answers.length && allResolved()) return null;
+    if (questions.length > 1) return "각 열린 질문에 대한 사용자 답변 근거를 별도로 지목하세요.";
     if (!input.receipt || input.receipt.kind !== "withdrawn") {
       return "열린 질문을 철회로 해제하려면 닫으려는 질문의 targetEvidenceId(활성 보고가 있으면 targetNoteRevision 포함)를 담은 withdrawn 영수증(receipt)을 제출하세요.";
     }
@@ -392,7 +399,7 @@ export async function verifyIdleClassification(
     if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
       return "열린 질문과 같은 발췌에서는 완료 영수증으로 idle 전환할 수 없습니다. 질문 해소 이후 최신 발췌를 확인하세요.";
     }
-    if (!isOpenQuestionResolved(latest, last.text, openQuestionCursor, anchoredIssues, openQuestionText, priorQuestionEvidenceId, input.questionAnswer)) {
+    if (!allResolved()) {
       return "열린 질문(question)에 대한 사용자 답변 또는 질문 철회 근거가 확인되지 않아 완료 영수증만으로 idle 전환할 수 없습니다. 열린 질문과 needsInput을 유지하세요.";
     }
   }
@@ -527,8 +534,8 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. When a user reply resolves an open question, compare its content with all requested inputs and cite questionAnswer:{questionEvidenceId,replyId} from the open question and observed userReplies. Keep partial answers and unrelated requests open. Writes a board judgment only. Never approves, completes work, or sends messages.",
-    input: judgment.extend({ sessionId: z.string(), questionAnswer: questionAnswerSchema.optional() }),
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. When a user reply resolves an open question, compare its content with all requested inputs and cite questionAnswer:{questionEvidenceId,replyId} from the open question and observed userReplies. For simultaneous questions cite an array, with noteRevision on the agent-note citation. Keep partial answers and unrelated requests open. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    input: judgment.extend({ sessionId: z.string(), questionAnswer: questionAnswersSchema.optional() }),
     async execute(input, { paseo, agent }) {
       if (input.kind !== "review" && input.reviewKind !== undefined) {
         throw new Error("reviewKind는 kind: 'review'일 때만 지정할 수 있습니다.");
@@ -825,7 +832,9 @@ export function attachCoordinatorTools(
               lastTurn.role === "assistant" &&
               !lastTurn.truncated &&
               priorOpenQuestion.evidenceId !== latest.id &&
-              isOpenQuestionResolved(latest, lastTurn.text, priorOpenQuestion.cursor, liveAnchoredIssues, priorOpenQuestion.text, priorOpenQuestion.evidenceId, input.questionAnswer);
+              isOpenQuestionResolved(latest, lastTurn.text, priorOpenQuestion.cursor, liveAnchoredIssues, priorOpenQuestion.text, priorOpenQuestion.evidenceId,
+                [input.questionAnswer].flat().find(a => a && a.questionEvidenceId === priorOpenQuestion.evidenceId && a.noteRevision === undefined),
+                !(liveActiveAgentNote && latestNote?.kind === "question"));
             if (!resolved) {
               nextOpenQuestion = openQuestionStateSchema.parse(priorOpenQuestion);
             }

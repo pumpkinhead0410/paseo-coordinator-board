@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { attachCoordinatorTools } from "../../server/coordinator";
+import { attachCoordinatorTools, verifyIdleClassification } from "../../server/coordinator";
 import { restoreClarifiedDecision } from "../../server/clarifications";
 import { classify, ConversationReader, excerpt } from "../../server/conversation";
 import { decorateDecision, isSupersededAgentNote } from "../../server/decisions";
@@ -218,6 +218,19 @@ test.each(["unrelated", "rollover", "reported answer"] as const)("binds stage-tw
       await expect(close({questionEvidenceId: opened.evidenceId, replyId: oldReply.replyId})).rejects.toThrow(/사용자 답변/);
     }
   }
+});
+
+test("general answers clear only the cited question, including when two sources share an excerpt", async () => {
+  const replyId = "epoch:4";
+  const evidence = {id: "latest", turns: [{role:"assistant" as const, text:"보존 기간을 기록했습니다."}],
+    userReplies:[{role:"user" as const, text:"14일 보관하세요.", replyId}]};
+  const note = {activeNoteKind:"question" as const, activeNoteEvidenceId:"opened", activeNoteCursor:"epoch:2",
+    activeNoteRevision:1, activeNoteText:"보존 기간을 알려 주세요.", hasActiveAgentNote:true, isClarificationReply:false};
+  const answer = {questionEvidenceId:"opened", replyId, noteRevision:1};
+  const verify = (context: typeof note & {previousOpenQuestion?: {evidenceId:string; cursor:string; text:string}}) =>
+    verifyIdleClassification(evidence, {text:"자료 확인", questionAnswer:answer}, context, {} as OutcomeVerifier);
+  expect(await verify(note)).toBeNull();
+  expect(await verify({...note, previousOpenQuestion:{evidenceId:"opened", cursor:"epoch:2", text:"원문과 저작권 규칙"}})).toMatch(/질문/);
 });
 
 test("plan_board_assignment exposes workspace kind, branch, path and session workspaceId for direct worktree assignment and owner reuse", async () => {
