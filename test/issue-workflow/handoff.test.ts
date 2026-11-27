@@ -322,10 +322,10 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with arbitrary surrounding prose (cleanup hold + unrelated doc task waiting) -> test commit/check verification guards!
+  // 3. Worker finishes /done with integration commit cf6f661 + comparison commit e9fe346 + cleanup hold + unrelated doc task waiting!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. 실제 통합 커밋은 cf6f661입니다. 비교 대상인 예전 커밋은 e9fe346입니다. CI 통과와 GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다. 별도 문서 작업은 자료를 기다립니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.
@@ -518,9 +518,9 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     receipt: { kind: "withdrawn", reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
-  // Withdrawing a DIFFERENT request within the same issue (#305 배포 일정 변경) cannot clear the open 2단계 자료 question!
+  // Withdrawing a DIFFERENT request within the same issue, even if another sentence mentions the open question's topic, is rejected!
   w305.updatedAt = "2026-11-26T06:39:00Z";
-  timelines.get("w305")!.push("#305의 배포 일정 변경 요청이 취소됐습니다.");
+  timelines.get("w305")!.push("#305의 배포 일정 변경 요청이 취소됐습니다. 2단계 자료에 관한 문서를 첨부합니다.");
   const otherRequestWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
   await expect(run("classify_board_conversation", {
     sessionId: "w305",

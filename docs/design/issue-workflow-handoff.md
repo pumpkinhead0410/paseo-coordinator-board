@@ -118,6 +118,10 @@ await classify_board_conversation({
   1. `server/coordinator.ts`·`server/outcome-verifier.ts`에서 영수증의 통합 커밋 SHA가 최신 완료 발췌에 실제로 연결되어 있는지(`commitCitedInText`)와 원격 커밋 메시지의 이슈 번호 일치(`commitOutcome.issues`)를 검증해, 다른 커밋(`e9fe346`)을 `commit`/`verifiedCommit`으로 대체하는 우회를 차단했습니다.
   2. `hasConfirmedWithdrawalForTarget`가 열린 질문의 핵심 주제 토큰(`extractTopicTokens`)과 철회 발췌의 주제 일치를 요구하도록 강화해, 같은 이슈 안의 다른 요청(“#308의 배포 일정 변경 요청이 취소됐습니다”) 철회로 열린 H1 질문이 해소되지 않게 했습니다.
   3. 최종 검증 구간을 `assertStableRow`(전) → `reader.read` → `assertStableRow`(후)로 감싸 마지막 `timeline.refetch()` 도중 세션이 `running`으로 전환되고 갱신 시각(`activityAt`)이 바뀌는 TOCTOU까지 차단했습니다.
+- **2026-11-27 (독립 의도 리뷰 14차 `14272eb7` 반영 및 Paseo SDK 경계 기록)**:
+  1. `commitCitedInText`가 비교·이전 커밋 문맥(“비교 대상인 예전 커밋은 `e9fe346`입니다”)을 제외하고 통합·반영 문맥에 속한 SHA만 인정하도록 강화했습니다(`server/coordinator.ts`).
+  2. `hasConfirmedWithdrawalForTarget`가 철회 문장 자체의 주제 토큰 일치(또는 순수 철회 확인 문장 + `대기 없이`/`필요 없` 등 대기 해제 문장의 주제 일치)만 허용하도록 좁혀, 다른 문장의 주제 단어(“H1 사진 검토에 관한 문서를 첨부합니다”)가 타 요청 철회에 빌려 쓰이지 않도록 차단했습니다(`server/coordinator.ts`).
+  3. **Paseo SDK 2-RPC 경계(플러그인 한계)**: `@getpaseo/plugin/server`에서 `agents.list()`와 `agents.ref(id).timeline.refetch()`는 공통 스냅샷 버전을 공유하지 않는 별도 비동기 RPC입니다. 실제 Paseo 데몬에서는 새 발화가 `agent.updatedAt`(`activityAt`)과 `status`를 함께 갱신하므로 `assertStableRow → reader.read → assertStableRow` 브래킷으로 탐지되나, 마지막 `agents.list()` 호출 도중 `activityAt`을 전혀 바꾸지 않고 타임라인만 변이하는 상황은 상위 Paseo SDK에 단일 스냅샷/CAS 원시 연산이 없는 한 플러그인 레이어에서 원천 차단할 수 없는 구조적 경계로 기록합니다.
 
 ## Acceptance criteria
 

@@ -35,15 +35,33 @@ function extractTopicTokens(text: string): Set<string> {
     const normalized = raw
       .toLowerCase()
       .replace(/(?:에서는|에서도|으로는|으로도|에서|에게|까지|부터|으로|은|는|이|가|을|를|의|에|로|와|과|도|만)$/, "");
-    if (normalized.length < 2 || /^\d+$/.test(normalized) || genericTopicStopwords.has(normalized)) continue;
+    if (
+      normalized.length < 2 ||
+      /^\d+$/.test(normalized) ||
+      genericTopicStopwords.has(normalized) ||
+      /^(?:확인|철회|취소|대기|종료|완료|진행)(?:했|됐|되었|합니|됩니|입니|됨|함)/.test(normalized)
+    ) continue;
     tokens.add(normalized);
   }
   return tokens;
 }
 
+const comparisonOrPriorCommitPattern = /(?:비교\s*대상|예전\s*커밋|이전\s*커밋|기존\s*커밋|전\s*커밋|구\s*커밋|참고\s*커밋|직전\s*커밋|\b(?:previous|older|prior|baseline)\s+commit\b|\bcompared\s+(?:to|with)\b|\binstead\s+of\b)/i;
+const integrationCommitContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:실제\s*)?(?:통합|반영|병합|머지)\s*커밋|(?:통합|반영|병합|머지|적용)(?:됐|됨|했|되었|완료|을\s*마쳤|과\s*검증)|\b(?:merged|integrated|landed|pushed\s+to\s+(?:origin\/)?(?:main|master))\b/i;
+const waitClearedPattern = /(?:대기\s*없이|필요\s*없|철회|취소|중단|해제|종료|\b(?:no\s+longer\s+(?:needed|waiting)|withdrawn|cancelled|canceled)\b)/i;
+
 function commitCitedInText(text: string, commit: string, resolvedSha?: string): boolean {
-  const candidates = text.match(/\b[0-9a-f]{7,40}\b/gi) ?? [];
-  return candidates.some(token => sameCommitRef(token, commit, resolvedSha));
+  const allTokens = new Set((text.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).map(t => t.toLowerCase()));
+  const clauses = text
+    .split(/(?:\r?\n|(?<=[.!?。])\s+|;\s+|\s+대신\s+)/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return clauses.some(clause => {
+    const tokens = clause.match(/\b[0-9a-f]{7,40}\b/gi) ?? [];
+    if (!tokens.some(token => sameCommitRef(token, commit, resolvedSha))) return false;
+    if (comparisonOrPriorCommitPattern.test(clause)) return false;
+    return integrationCommitContextPattern.test(clause) || allTokens.size === 1;
+  });
 }
 
 function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<number>, openQuestionText: string): boolean {
@@ -53,7 +71,7 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     .split(/(?:\r?\n|(?<=[.!?。])\s+)/)
     .map(s => s.trim())
     .filter(Boolean);
-  const hasMatchingSentence = sentences.some(sentence => {
+  const withdrawalSentences = sentences.filter(sentence => {
     if (!withdrawalEvidencePattern.test(sentence)) return false;
     if (tentativeOrNegatedWithdrawalPattern.test(sentence)) return false;
     if (separateTaskWithdrawalPattern.test(sentence)) return false;
@@ -63,14 +81,29 @@ function hasConfirmedWithdrawalForTarget(lastText: string, anchoredIssues: Set<n
     }
     return true;
   });
-  if (!hasMatchingSentence) return false;
+  if (withdrawalSentences.length === 0) return false;
   const questionTokens = extractTopicTokens(openQuestionText);
-  if (questionTokens.size > 0) {
-    const lastTokens = extractTopicTokens(trimmed);
-    const hasTopicOverlap = [...questionTokens].some(token => lastTokens.has(token));
-    if (!hasTopicOverlap) return false;
-  }
-  return true;
+  if (questionTokens.size === 0) return true;
+
+  const directMatch = withdrawalSentences.some(sentence => {
+    const sTokens = extractTopicTokens(sentence);
+    return [...questionTokens].some(token => sTokens.has(token));
+  });
+  if (directMatch) return true;
+
+  const hasPureConfirmation = withdrawalSentences.some(sentence => extractTopicTokens(sentence).size === 0);
+  if (!hasPureConfirmation) return false;
+  return sentences.some(sentence => {
+    if (
+      !waitClearedPattern.test(sentence) ||
+      tentativeOrNegatedWithdrawalPattern.test(sentence) ||
+      separateTaskWithdrawalPattern.test(sentence)
+    ) {
+      return false;
+    }
+    const sTokens = extractTopicTokens(sentence);
+    return [...questionTokens].some(token => sTokens.has(token));
+  });
 }
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
