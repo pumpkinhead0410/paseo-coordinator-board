@@ -396,10 +396,15 @@ test("question-specific withdrawal and replies can resolve separate open questio
   const before = f.prefs.read().judgments.w305;
   await expect(finish(partial.evidenceId, retentionAnswer)).rejects.toThrow(/질문/);
   expect(f.prefs.read().judgments.w305).toEqual(before);
+  await expect(classify({evidenceId: partial.evidenceId, kind: "review", text: "부분 확인", receipt, questionAnswer: retentionAnswer}))
+    .rejects.toThrow(/receipt는 kind: 'idle'/);
   append({role: "user", text: "표지 이미지는 cover.png를 사용하세요."},
-    "H1 사진 검토 요청이 취소됐습니다. 원문 보존 기간과 표지 이미지 경로를 기록했습니다.");
+    "원문 보존 기간과 표지 이미지 경로를 알려 주세요.\nH1 사진 검토 요청이 취소됐습니다.");
+  const stillAsking = await read();
+  const coverAnswer = {questionEvidenceId: cover, replyId: stillAsking.userReplies.at(-1).replyId};
+  await expect(finish(stillAsking.evidenceId, [retentionAnswer, coverAnswer])).rejects.toThrow(/철회·취소 근거/);
+  append("H1 사진 검토 요청이 취소됐습니다. 원문 보존 기간과 표지 이미지 경로를 기록했습니다.");
   const done = await read();
-  const coverAnswer = {questionEvidenceId: cover, replyId: done.userReplies.at(-1).replyId};
   await expect(classify({evidenceId: done.evidenceId, kind: "idle", text: "남은 결정 없음",
     receipt: {...receipt, targetEvidenceId: cover}, questionAnswer: [retentionAnswer, coverAnswer]}))
     .rejects.toThrow(/철회·취소 근거/);
@@ -413,19 +418,46 @@ test("a review with one cited answer keeps the other question and its needsInput
   const f = await openIssueBoard();
   const sessionId = "w305";
   const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
   const first = await read();
   const remaining = {question: "공식 안전문을 보내 주세요.", needsInput: "공식 CE/UL 원문"};
   await classify({evidenceId: first.evidenceId, kind: "question", text: remaining.question, content: remaining});
   append("보존 기간을 알려 주세요.");
   const second = await read();
   await classify({evidenceId: second.evidenceId, kind: "question", text: "보존 기간을 알려 주세요."});
-  append({role: "user", text: "14일 보존하세요."}, "보존 기간을 기록했습니다.");
+  const secondCard = projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  await board.reply({projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
+    text: "14일 보존하세요.", requestKey: "partial-answer-reply", version: secondCard!.session.decision!.version});
+  append({role: "user", text: "14일 보존하세요."}, "보존 기간을 기록했습니다. 다만 공식 안전문은 여전히 필요합니다.");
   const latest = await read();
   await classify({evidenceId: latest.evidenceId, kind: "review", text: "#305 1단계 통합 확인",
     questionAnswer: {questionEvidenceId: second.evidenceId, replyId: latest.userReplies.at(-1).replyId}});
   expect(f.prefs.read().judgments.w305.openQuestions?.map(q => q.evidenceId)).toEqual([first.evidenceId]);
-  const card = projectCards(await f.board().snapshot()).human.find(c => c.session.id === sessionId);
+  const card = projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
   expect(card?.session.decision).toMatchObject({...remaining, evidenceId: first.evidenceId});
+});
+
+test("replying to a coordinator question does not mark a separate agent-note question as answered", async () => {
+  const f = await openIssueBoard();
+  const sessionId = "w305";
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
+  const noteEv = await read();
+  expect(recordReport(f.notes, sessionId, {kind: "question", text: "H1 사진 검토 확인 필요"}, noteEv.evidenceId).isError).not.toBe(true);
+  append("표기 형식을 선택해 주세요.");
+  const coordEv = await read();
+  await classify({evidenceId: coordEv.evidenceId, kind: "question", text: "표기 형식을 선택해 주세요.",
+    content: {question: "표기 형식을 선택해 주세요.", needsInput: "표기 형식"}});
+  const coordCard = projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  await board.reply({projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
+    text: "표준 형식으로 진행하세요.", requestKey: "coord-question-reply", version: coordCard!.session.decision!.version});
+  expect(f.prefs.read().answers[sessionId]?.noteRevision).toBeUndefined();
+  append({role: "user", text: "표준 형식으로 진행하세요."}, "표기 형식을 기록했습니다.");
+  const after = await read();
+  await classify({evidenceId: after.evidenceId, kind: "review", text: "표기 형식 확인 완료",
+    questionAnswer: {questionEvidenceId: coordEv.evidenceId, replyId: after.userReplies.at(-1).replyId}});
+  const remainingNoteCard = projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  expect(remainingNoteCard?.session.decision).toMatchObject({source: "agent-note", question: "H1 사진 검토 확인 필요"});
 });
 
 test.each(["unrelated", "rollover", "reported answer"] as const)("binds stage-two answers to their question: %s", async scenario => {

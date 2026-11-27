@@ -324,7 +324,7 @@ export async function verifyIdleClassification(
     if (!targets.length) return `철회 영수증의 targetEvidenceId(${targetEvidenceId})가 열린 질문의 근거와 일치하지 않습니다.`;
     const withdrawn = targets.find(question => question.noteRevision === targetNoteRevision);
     if (!withdrawn) return `철회 영수증의 targetNoteRevision(${targetNoteRevision ?? "없음"})이 열린 질문의 판본과 일치하지 않습니다.`;
-    if (!hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, withdrawn.text)) {
+    if (hasRemainingHumanNeed(last.text) || !hasConfirmedWithdrawalForTarget(last.text, anchoredIssues, withdrawn.text)) {
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
     }
     if (!questions.every(question => question === withdrawn || answered(question))) {
@@ -542,6 +542,9 @@ export function attachCoordinatorTools(
     async execute(input, { paseo, agent }) {
       if (input.kind !== "review" && input.reviewKind !== undefined) {
         throw new Error("reviewKind는 kind: 'review'일 때만 지정할 수 있습니다.");
+      }
+      if (input.kind !== "idle" && input.receipt !== undefined) {
+        throw new Error("receipt는 kind: 'idle'일 때만 지정할 수 있습니다.");
       }
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
       const row = rows.find(r => r.id === input.sessionId);
@@ -807,7 +810,7 @@ export function attachCoordinatorTools(
         const lastTurn = latest.turns.at(-1);
         if (input.kind === "idle" && !isClarificationReply) pending = [];
         else if (input.questionAnswer && lastTurn?.role === "assistant" && !lastTurn.truncated &&
-          !latest.laterInput && !isClarificationReply && !hasRemainingHumanNeed(lastTurn.text)) {
+          !latest.laterInput && !isClarificationReply) {
           const answers = [input.questionAnswer].flat();
           pending = pending.filter(question => !hasQuestionAnswer(latest, question, answers));
         }

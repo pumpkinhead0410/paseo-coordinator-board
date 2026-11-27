@@ -217,7 +217,7 @@ export class DecisionSender {
           ...(input.images?.length ? {imageCount:input.images.length} : {}),
           answer: input.text, recipientId: input.recipientId, coordinator: input.action === "coordinate" },
         fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version,
-        ...(note?.kind === "question" && !row.decision.evidenceId ? { noteRevision: note.revision } : {}),
+        ...(note?.kind === "question" && (row.decision.source === "agent-note" || row.decision.source === "person-note") ? { noteRevision: note.revision } : {}),
       };
     });
     try {
