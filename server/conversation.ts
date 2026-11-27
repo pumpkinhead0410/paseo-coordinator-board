@@ -6,11 +6,14 @@ import type { Preferences } from "./preferences";
 
 type Sdk = PluginHandlerContext["paseo"];
 type Page = Awaited<ReturnType<ReturnType<Sdk["agents"]["ref"]>["timeline"]["refetch"]>>;
-export type Turn = { role: "user" | "assistant"; text: string; truncated?: boolean; at?: string };
+export type Turn = { role: "user" | "assistant"; text: string; truncated?: boolean; at?: string; replyId?: string };
 type ClarificationObservation = { bodyHash: string; response?: string };
 export type Evidence = {
   quota?: ReturnType<typeof quotaEvidence>;
   id: string; turns: Turn[];
+  cursor?: string;
+  userReplies?: Turn[];
+  evidencePositions?: Map<string, string>;
   replies?: Map<string, string>;
   lastInputIds?: string[];
   boardMessageHashes?: Map<string,string>;
@@ -26,6 +29,10 @@ export function excerpt(page: Page): Evidence {
   if (page.error || page.gap || page.staleCursor) throw new Error("대화 발췌를 확인할 수 없습니다.");
   const turns: Turn[] = [];
   const digest = createHash("sha256").update(page.epoch);
+  const epoch = createHash("sha256").update(page.epoch).digest("hex").slice(0, 24);
+  const position = (seq: number) => epoch + ":" + seq;
+  const userReplies: Turn[] = [];
+  const evidencePositions = new Map<string, string>();
   const laterInputs: string[] = [];
   const deliveries: NonNullable<Evidence["deliveries"]> = [];
   const replies = new Map<string, string>();
@@ -64,12 +71,16 @@ export function excerpt(page: Page): Evidence {
     }
     if (!text) continue;
     laterInputs.length = 0;
-    turns.push({ role, text: text.slice(-2000), ...(timestamp ? { at:timestamp } : {}), ...(text.length > 2000 ? { truncated: true } : {}) });
+    const turn: Turn = { role, ...(role === "user" && !clarification ? {replyId: position(seqEnd)} : {}), text: text.slice(-2000), ...(timestamp ? { at:timestamp } : {}), ...(text.length > 2000 ? { truncated: true } : {}) };
+    turns.push(turn);
+    if (turn.replyId) userReplies.push(turn);
     digest.update(JSON.stringify([seqEnd, role, text]));
+    evidencePositions.set(digest.copy().digest("hex").slice(0, 24), position(seqEnd));
   }
   if (laterInputs.length) digest.update(JSON.stringify(laterInputs));
   const quota = quotaEvidence(page);
   return { ...(quota ? {quota} : {}), id: digest.digest("hex").slice(0, 24), turns: turns.slice(-4),
+    cursor: position(page.entries.at(-1)?.seqEnd ?? 0), userReplies, evidencePositions,
     ...(clarification && messageIds.length ? { lastInputIds: messageIds } : {}),
     ...(clarificationMessages.size ? { clarificationMessages } : {}),
     ...(boardMessageHashes.size ? {boardMessageHashes} : {}),

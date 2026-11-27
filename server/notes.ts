@@ -28,7 +28,7 @@ export class NoteStore {
     return Object.fromEntries([...this.read()].filter(([id]) => sessionIds.has(id)));
   }
 
-  update(change: Change, origin: "person" | "agent" = "person") {
+  update(change: Change, origin: "person" | "agent" = "person", questionCursor?: string) {
     const notes = this.read();
     const previous = notes.get(change.sessionId);
     if ((previous?.revision ?? 0) !== change.expectedRevision) return { ok: false, conflict: true };
@@ -36,6 +36,7 @@ export class NoteStore {
     if (previous?.kind === change.kind && previous.text === text && previous.origin === origin && previous.evidenceId === change.evidenceId) return { ok: true, conflict: false };
     notes.set(change.sessionId, {
       ...(change.kind === "question" ? {requestedAt: new Date().toISOString()} : {}),
+      ...(questionCursor ? {questionCursor} : {}),
       sessionId: change.sessionId, kind: change.kind, text, origin, ...(change.evidenceId ? { evidenceId: change.evidenceId } : {}), revision: change.expectedRevision + 1,
     });
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });

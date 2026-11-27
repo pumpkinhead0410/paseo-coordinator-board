@@ -4,6 +4,7 @@ export { readPages } from "../shared/pages";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { reportingKey, type SessionRow } from "../shared/contract";
 
+import { githubRepository } from "../shared/github-repository";
 import { workspacePull } from "../shared/workspace-pull";
 
 type Sdk = PluginHandlerContext["paseo"];
@@ -69,6 +70,7 @@ export async function discoverSessions(paseo: Pick<Sdk, "agents" | "workspaces">
       continue;
     }
     const work = workspace && !workspace.internal ? workspacePull(workspace) : undefined;
+    const repo = work?.repo ?? (workspace && !workspace.internal ? githubRepository(workspace.gitRuntime?.remoteUrl) : null);
     const permission = permissionVersion(agent);
     rows.set(agent.id, {
       ...(work ? { workspacePull: work } : {}),
@@ -76,6 +78,8 @@ export async function discoverSessions(paseo: Pick<Sdk, "agents" | "workspaces">
       title: agent.title?.trim() || `세션 ${agent.id.slice(0, 8)}`,
       projectId: workspace?.projectId || project.projectKey || "unassigned",
       projectTitle: workspace?.projectCustomName?.trim() || workspace?.projectDisplayName || project.projectName || "프로젝트 미확인",
+      ...(repo ? { projectRepo: repo } : {}),
+      ...(agent.workspaceId ? { workspaceId: agent.workspaceId } : {}),
       workspaceTitle: workspace?.title?.trim() || workspace?.name || project.workspaceName || "워크스페이스 미확인",
       provider: agent.provider?.trim() || null,
       model: agent.model?.trim() || null,

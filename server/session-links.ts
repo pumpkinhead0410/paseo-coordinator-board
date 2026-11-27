@@ -78,6 +78,7 @@ export function registerSessionLinks(server: PluginServerContext, store: Prefere
       if ((existing?.targetProjectId ?? null) !== input.targetProjectId) {
         if (scope.factCycle) delete scope.factCycle.candidates[input.sessionId];
         delete scope.judgments[input.sessionId];
+        delete scope.supersededAgentNotes[input.sessionId];
         if (scope.coordinator === input.sessionId) releaseUnmanagedCoordinator(rows, scope);
       }
     });

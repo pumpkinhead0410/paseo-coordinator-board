@@ -197,16 +197,19 @@ test("직접 저장한 실행기 기본 강도를 보존하고 추천 목록 밖
   assert.equal(resolveRoute("C", { C:[saved] }, [model])?.effort, null);
 });
 
-test("워크스페이스 목록은 페이지를 넘겨 관리 프로젝트의 준비된 작업 위치만 표시한다", async () => {
+test("워크스페이스 목록은 페이지를 넘겨 관리 프로젝트의 준비된 작업 위치와 종류·브랜치·경로를 표시한다", async () => {
   const calls: (string | undefined)[] = [];
   const sdk = { workspaces: { list: async ({ page }: { page: { cursor?: string } }) => {
     calls.push(page.cursor);
-    return page.cursor ? { entries: [{ ...workspace, title: "선택 가능" }], pageInfo: { hasMore: false, nextCursor: null } } :
+    return page.cursor ? { entries: [{ ...workspace, title: "선택 가능", workspaceKind: "worktree", gitRuntime: { currentBranch: "feat/issue-308" } }], pageInfo: { hasMore: false, nextCursor: null } } :
       { entries: [{ ...workspace, id: "other", projectId: "other" }, { ...workspace, internal: true }, { ...workspace, setupStatus: "failed" }, { ...workspace, archivingAt: "now" }],
         pageInfo: { hasMore: true, nextCursor: "page-2" } };
   } } } as unknown as Parameters<typeof readManagedWorkspaces>[0];
   assert.deepEqual(await readManagedWorkspaces(sdk, []), []);
-  assert.deepEqual(await readManagedWorkspaces(sdk, [workspace.projectId]), [{ id: workspace.id, projectId: workspace.projectId, title: "선택 가능" }]);
+  assert.deepEqual(await readManagedWorkspaces(sdk, [workspace.projectId]), [{
+    id: workspace.id, projectId: workspace.projectId, title: "선택 가능",
+    kind: "worktree", branch: "feat/issue-308", path: workspace.workspaceDirectory,
+  }]);
   assert.deepEqual(calls, [undefined, "page-2"]);
 });
 

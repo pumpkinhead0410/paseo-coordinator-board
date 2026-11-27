@@ -135,9 +135,18 @@ export async function readManagedWorkspaces(paseo: Pick<Sdk, "workspaces">, proj
   const rows = await readPages<PaseoWorkspace>(page => paseo.workspaces.list({
     filter: { includeBackground: false }, sort: [{ key: "project_id", direction: "asc" }], page,
   }));
-  return rows.filter(w => usable(w) && projects.includes(w.projectId)).map(w => ({
-    id: w.id, projectId: w.projectId, title: w.title?.trim() || w.name,
-  }));
+  return rows.filter(w => usable(w) && projects.includes(w.projectId)).map(w => {
+    const branch = w.gitRuntime?.currentBranch?.trim();
+    const path = w.workspaceDirectory?.trim();
+    return {
+      id: w.id,
+      projectId: w.projectId,
+      title: w.title?.trim() || w.name,
+      ...(w.workspaceKind ? { kind: w.workspaceKind } : {}),
+      ...(branch ? { branch } : {}),
+      ...(path ? { path } : {}),
+    };
+  });
 }
 
 // A caller-chosen UUID keeps old hosts from silently falling back to unkeyed create-and-prompt.

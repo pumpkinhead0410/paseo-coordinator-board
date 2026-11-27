@@ -20,33 +20,78 @@ const changed = "결정 카드 또는 수신자가 바뀌었습니다. 보드를
 const blocked = "이 세션의 현재 상태에서는 보낼 수 없습니다. 원래 세션에서 권한 요청과 작업 상태를 확인하세요.";
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+export function isSupersededAgentNote(
+  row: Pick<SessionRow, "id" | "projectId" | "evidenceId">,
+  note: Note | undefined,
+  prefs: Pick<Preferences, "judgments"> & Partial<Pick<Preferences, "supersededAgentNotes">>,
+) {
+  if (note?.origin !== "agent" || note.kind === "clear" || !note.evidenceId) {
+    return false;
+  }
+  const superseded = prefs.supersededAgentNotes?.[row.id];
+  if (
+    superseded?.projectId === row.projectId &&
+    superseded.revision === note.revision &&
+    superseded.evidenceId === note.evidenceId &&
+    (!row.evidenceId || row.evidenceId !== note.evidenceId)
+  ) {
+    return true;
+  }
+  const judgment = prefs.judgments[row.id];
+  return (
+    judgment?.projectId === row.projectId &&
+    judgment.kind === "idle" &&
+    !!row.evidenceId &&
+    row.evidenceId !== note.evidenceId &&
+    judgment.evidenceId === row.evidenceId
+  );
+}
+
 export function decorateDecision(row: SessionRow, note: Note | undefined, prefs: Preferences, evidence?: Evidence) {
   const answer = prefs.answers[row.id];
-  const noteQuestion = note?.kind === "question";
-  const answeredNote = noteQuestion && answer?.noteRevision === note.revision;
-  const dismissed = row.evidenceId && row.evidenceId === note?.evidenceId && note.origin === "person" && note.kind !== "question";
+  const supersededAgentNote = isSupersededAgentNote(row, note, prefs);
+  if (supersededAgentNote) row.agentNoteSuperseded = true;
+  else delete row.agentNoteSuperseded;
+  const activeNote = supersededAgentNote ? undefined : note;
+  const noteQuestion = activeNote?.kind === "question";
+  const answeredNote = noteQuestion && answer?.noteRevision === activeNote.revision;
+  const dismissed = row.evidenceId && row.evidenceId === activeNote?.evidenceId && activeNote.origin === "person" && activeNote.kind !== "question";
+  const judgment = prefs.judgments[row.id];
+  const matched = judgment?.projectId === row.projectId ? judgment : undefined;
+  const currentQuestion = matched?.kind === "question" ? matched : undefined;
+  const structured = currentQuestion?.evidenceId === row.evidenceId ? currentQuestion : undefined;
+  const pending = matched?.openQuestions ?? (matched?.openQuestion ? [matched.openQuestion] : []);
+  const carried = currentQuestion
+    ? (structured ? undefined : { ...currentQuestion, question: currentQuestion.content?.question })
+    : pending.at(-1);
   let content: Omit<Decision, "version">;
+  let questionEvidenceId: string | undefined;
   if (row.nativePending) {
     content = { source: "permission", question: row.detail };
+  } else if (carried?.text && row.status === "idle" && row.evidenceId && !dismissed && !row.boardFact?.current) {
+    content = { ...carried.content, source: "coordinator", question: carried.question ?? carried.text };
+    questionEvidenceId = carried.evidenceId;
+    // A newly detected question remains visible as evidence until it is classified.
+    if (row.lane !== "human") row.detail = "코디네이터 판단 · " + content.question;
+    row.lane = "human";
+    row.decisionRequestedAt = carried.requestedAt;
   } else if (row.status === "idle" && row.evidenceId && !dismissed && row.lane === "human") {
-    const judgment = prefs.judgments[row.id];
-    const structured = judgment?.kind === "question" && judgment.evidenceId === row.evidenceId && judgment.projectId === row.projectId;
     content = structured
-      ? { ...judgment.content, source: "coordinator", question: judgment.content?.question || judgment.text }
+      ? { ...structured.content, source: "coordinator", question: structured.content?.question || structured.text }
       : { source: "conversation", question: row.detail.replace(/^세션의 확인 요청 · /, "") };
   } else if (noteQuestion && !answeredNote && row.status === "idle" && row.evidenceId) {
-    content = { source: note.origin === "agent" ? "agent-note" : "person-note", question: note.text };
+    content = { source: activeNote.origin === "agent" ? "agent-note" : "person-note", question: activeNote.text };
   } else {
     if (answeredNote && !row.nativePending) row.decisionAnswered = true;
     return;
   }
-  const version = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : row.evidenceId, note?.revision ?? 0, content]);
+  const version = hash([row.projectId, row.id, row.nativePending ? row.permissionVersion : questionEvidenceId ?? row.evidenceId, activeNote?.revision ?? 0, content]);
   if (content.source !== "permission" && answer?.version === version) {
     row.decisionAnswered = true;
     row.lane = "review";
     row.detail = "답장을 보냈습니다. 담당 세션의 결과를 기다립니다.";
   } else {
-    row.decision = { ...content, version };
+    row.decision = { ...content, version, ...(questionEvidenceId ? {evidenceId: questionEvidenceId} : {}) };
     if (content.source === "conversation" && evidence) {
       const excerpt = lastConversationQuestion(evidence, row.id === prefs.coordinator);
       if (excerpt?.question === content.question && excerpt.markdown !== content.question) {
@@ -171,7 +216,8 @@ export class DecisionSender {
           title: row.decision.question || row.title, at: new Date().toISOString(), projectId: input.projectId,
           ...(input.images?.length ? {imageCount:input.images.length} : {}),
           answer: input.text, recipientId: input.recipientId, coordinator: input.action === "coordinate" },
-        fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version, ...(note?.kind === "question" ? { noteRevision: note.revision } : {}),
+        fingerprint, sessionId: row.id, version: input.version, evidenceId: evidence.id, status: "pending", beforeAnswer: current.answers[row.id]?.version,
+        ...(note?.kind === "question" && !row.decision.evidenceId ? { noteRevision: note.revision } : {}),
       };
     });
     try {
