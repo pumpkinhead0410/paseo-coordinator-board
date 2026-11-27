@@ -11,7 +11,8 @@ import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
 const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
-const withdrawalEvidencePattern = /요청\s*철회|철회(?:를|가|됨|됐|했|확인)|취소(?:를|가|됨|됐|했|확인)|진행하지\s*않|자료\s*대기\s*없이|더\s*이상\s*필요\s*없|\b(?:withdrawn|withdraw|cancelled|canceled|no\s+longer\s+needed)\b/i;
+const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
+const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
 const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
@@ -85,8 +86,8 @@ export async function verifyIdleClassification(
       return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
     }
     const trimmedLast = last.text.trim();
-    if (!withdrawalEvidencePattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
-      return "최신 발췌에서 원래 요청의 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
+    if (!withdrawalEvidencePattern.test(trimmedLast) || tentativeOrNegatedWithdrawalPattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
+      return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
     }
     return null;
   }
@@ -107,8 +108,8 @@ export async function verifyIdleClassification(
       return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
     const trimmedLast = last.text.trim();
-    if (!withdrawalEvidencePattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
-      return "최신 발췌에서 원래 요청의 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
+    if (!withdrawalEvidencePattern.test(trimmedLast) || tentativeOrNegatedWithdrawalPattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
+      return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
     }
     return null;
   }
@@ -122,14 +123,14 @@ export async function verifyIdleClassification(
 
   const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
   const proseAnchorIssues = extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
-  const turnIssues = extractAnchoredIssues(latest.turns.map(turn => turn.text).join(" "));
+  const priorTurnIssues = extractAnchoredIssues(latest.turns.slice(0, -1).map(turn => turn.text).join(" "));
   const anchoredIssues = structuralIssues.size > 0
     ? structuralIssues
     : proseAnchorIssues.size > 0
       ? proseAnchorIssues
-      : turnIssues;
+      : priorTurnIssues;
   if (anchoredIssues.size === 0) {
-    return `세션 제목·워크스페이스·이전 판단·대화 발췌에서 대상 이슈 번호를 확인할 수 없어 #${receipt.issue} 영수증을 대조할 수 없습니다.`;
+    return `세션 제목·워크스페이스·이전 판단·이전 대화에서 대상 이슈 번호를 확인할 수 없어 #${receipt.issue} 영수증을 대조할 수 없습니다.`;
   }
   if (!anchoredIssues.has(receipt.issue)) {
     return `영수증 이슈(#${receipt.issue})가 대상 세션의 이슈(${[...anchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
@@ -295,6 +296,11 @@ export function attachCoordinatorTools(
           verifier,
         );
         if (rejection) throw new Error(rejection);
+        const wsAfter = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
+        const latestAfter = await reader.read(paseo, row, true);
+        if (!latestAfter?.turns.length || latestAfter.id !== input.evidenceId) {
+          throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
+        }
         const rowsAfter = await managedRowsForCoordinator(paseo, prefs, agent.id);
         const rowAfter = rowsAfter.find(r => r.id === input.sessionId);
         if (!rowAfter) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
@@ -306,12 +312,12 @@ export function attachCoordinatorTools(
           throw new Error("실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요.");
         }
         if (rowAfter.status !== "idle") throw new Error(`대기 중인 관리 세션을 확인해 주세요(현재 상태: ${rowAfter.status ?? "unknown"}).`);
-        const latestAfter = await reader.read(paseo, rowAfter, true);
-        if (!latestAfter?.turns.length || latestAfter.id !== input.evidenceId) {
-          throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
+        const refreshedWsRepo = githubRepository(wsAfter?.gitRuntime?.remoteUrl) ?? undefined;
+        const listedWsRepo = rowAfter.workspacePull?.repo ?? rowAfter.projectRepo;
+        if (refreshedWsRepo && listedWsRepo && refreshedWsRepo.toLowerCase() !== listedWsRepo.toLowerCase()) {
+          throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
         }
-        const wsAfter = rowAfter.workspaceId ? await paseo.workspaces.ref(rowAfter.workspaceId).refresh().catch(() => null) : null;
-        afterWorkspaceRepo = rowAfter.workspacePull?.repo ?? rowAfter.projectRepo ?? githubRepository(wsAfter?.gitRuntime?.remoteUrl) ?? undefined;
+        afterWorkspaceRepo = listedWsRepo ?? refreshedWsRepo;
       }
 
       prefs.change(scope => {

@@ -36,7 +36,7 @@ type MockAgent = {
   pendingPermissions: { id: string }[];
 };
 
-async function openIssueBoard(options: { onVerifyIssue?: () => void } = {}) {
+async function openIssueBoard(options: { onVerifyIssue?: () => void; onWorkspaceRefresh?: (count: number) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "board-issue-workflow-"));
   dirs.push(dir);
   const prefs = new PreferenceStore(join(dir, "scope.json"));
@@ -98,6 +98,7 @@ async function openIssueBoard(options: { onVerifyIssue?: () => void } = {}) {
     },
   };
 
+  let wsRefreshCount = 0;
   const page = <T,>(entries: T[]) => ({ entries, pageInfo: { hasMore: false, nextCursor: null } });
   const sdk = {
     projects: {
@@ -107,7 +108,13 @@ async function openIssueBoard(options: { onVerifyIssue?: () => void } = {}) {
     },
     workspaces: {
       list: async () => page(workspaces),
-      ref: (id: string) => ({ refresh: async () => workspaces.find(w => w.id === id) ?? null }),
+      ref: (id: string) => ({
+        refresh: async () => {
+          wsRefreshCount += 1;
+          options.onWorkspaceRefresh?.(wsRefreshCount);
+          return workspaces.find(w => w.id === id) ?? null;
+        },
+      }),
     },
     agents: {
       list: async () => page(agents.map(agent => ({ agent, project: { projectKey: "easydocs", projectName: "EasyDocs" } }))),
@@ -465,6 +472,18 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     receipt: { kind: "withdrawn", reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
 
+  // Checking whether the user withdrew ("철회 여부를 확인 중입니다") is also rejected fail-closed!
+  w305.updatedAt = "2026-11-26T06:37:00Z";
+  timelines.get("w305")!.push("사용자 요청 철회 여부를 확인 중입니다.");
+  const checkingWithdraw305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: checkingWithdraw305.evidenceId,
+    kind: "idle",
+    text: "#305 철회",
+    receipt: { kind: "withdrawn", reason: "임의 철회" },
+  })).rejects.toThrow(/철회·취소 근거/);
+
   // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
   w305.updatedAt = "2026-11-26T06:40:00Z";
   timelines.get("w305")!.push("사용자 요청 철회를 확인했습니다. 2단계 자료 대기 없이 대기합니다.");
@@ -514,11 +533,30 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...cf6f661000000000000000000000000000000000") {
       return "behind\n";
     }
-    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/check-runs") {
-      return JSON.stringify({ check_runs: [{ status: "completed", conclusion: "success" }] });
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/check-runs?per_page=100&page=1") {
+      return JSON.stringify({ total_count: 1, check_runs: [{ status: "completed", conclusion: "success" }] });
     }
-    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/status") {
-      return JSON.stringify({ state: "success", statuses: [] });
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/status?per_page=100&page=1") {
+      return JSON.stringify({ state: "success", total_count: 0, statuses: [] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/aabbccd") {
+      return "aabbccd000000000000000000000000000000000\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/compare/main...aabbccd000000000000000000000000000000000") {
+      return "behind\n";
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/aabbccd000000000000000000000000000000000/check-runs?per_page=100&page=1") {
+      // Truncated page: total_count is 31, only 30 returned, page 2 is empty -> MUST fail closed as unavailable!
+      return JSON.stringify({
+        total_count: 31,
+        check_runs: Array.from({ length: 30 }, () => ({ status: "completed", conclusion: "success" })),
+      });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/aabbccd000000000000000000000000000000000/check-runs?per_page=100&page=2") {
+      return JSON.stringify({ total_count: 31, check_runs: [] });
+    }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/aabbccd000000000000000000000000000000000/status?per_page=100&page=1") {
+      return JSON.stringify({ state: "success", total_count: 0, statuses: [] });
     }
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/deadbee") {
       throw new Error("Not Found");
@@ -540,6 +578,12 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     onMain: false,
     checks: "unavailable",
   });
+  // Incomplete check-runs pagination (total_count: 31, only 30 received) fails closed as unavailable!
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "aabbccd")).toEqual({
+    onMain: true,
+    resolvedSha: "aabbccd000000000000000000000000000000000",
+    checks: "unavailable",
+  });
   expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "cf6f661")).toEqual({
     onMain: true,
     resolvedSha: "cf6f661000000000000000000000000000000000",
@@ -548,10 +592,14 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
   expect(calls.every(c => c.startsWith("gh "))).toBe(true);
 });
 
-test("classify_board_conversation rejects unanchored receipts and mid-verification TOCTOU (new report or remote change)", async () => {
+test("classify_board_conversation rejects unanchored receipts and mid-verification TOCTOU (new report, remote change, or resume during final refresh)", async () => {
   let midVerifyAction: (() => void) | undefined;
+  let finalRefreshAction: (() => void) | undefined;
   const { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, run } = await openIssueBoard({
     onVerifyIssue: () => midVerifyAction?.(),
+    onWorkspaceRefresh: (count) => {
+      if (count % 2 === 0) finalRefreshAction?.();
+    },
   });
   const w308 = agents.find(a => a.id === "w308")!;
   issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
@@ -567,10 +615,10 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     closeReason: "COMPLETED" as const,
   };
 
-  // 1. Unanchored session (no issue number in title, workspaceTitle, previous judgment, note, or turns) rejects arbitrary #999 receipt!
+  // 1. Unanchored session cannot adopt #999 from the closing turn itself ("다른 작업 #999의 종료 결과를 조회했습니다")!
   w308.title = "사진 교체 구현";
   workspaces[1].title = "EasyDocs 사진 교체 작업";
-  timelines.set("w308", ["통합과 검증을 마쳤습니다."]);
+  timelines.set("w308", ["다른 작업 #999의 종료 결과를 조회했습니다."]);
   const unanchoredEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
   await expect(run("classify_board_conversation", {
     sessionId: "w308",
@@ -599,7 +647,23 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
   expect(prefs.read().supersededAgentNotes.w308).toBeUndefined();
   expect(prefs.read().judgments.w308).toBeUndefined();
 
-  // 3. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
+  // 3. Session resuming (`running`) during the final workspace refresh MUST abort idle classification!
+  midVerifyAction = undefined;
+  finalRefreshAction = () => {
+    w308.status = "running";
+  };
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/실행 중인 세션/);
+  expect(prefs.read().judgments.w308).toBeUndefined();
+  w308.status = "idle";
+  finalRefreshAction = undefined;
+
+  // 4. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
   midVerifyAction = () => {
     workspaces[1].gitRuntime.remoteUrl = "https://github.com/other/EasyDocs.git";
   };

@@ -106,6 +106,10 @@ await classify_board_conversation({
   1. `server/outcome-verifier.ts`에서 로컬 `main` 분기 대신 원격 GitHub `compare/main...<sha>`로만 반영 여부를 확인하고, `summarizeCommitChecks`가 `SKIPPED`/`NEUTRAL`만 있는 체크를 `passed`로 인정하지 않고 최소 1건의 실제 `SUCCESS`를 요구하도록 수정했습니다.
   2. `server/coordinator.ts`에서 비동기 검증 뒤 워크스페이스 원격(`remoteUrl`)·보고 판본(`notes` `revision`)·기존 판단(`evidenceId`/`kind`)을 저장 직전에 재대조해 검증 중 새 질문 도착이나 원격 변경 TOCTOU를 차단했습니다.
   3. 대상 이슈 앵커를 제목·워크스페이스·이전 판단·대화 발췌 순으로 확보하되 앵커가 전혀 없으면 fail-closed로 거절하고, `withdrawn`과 열린 질문의 `idle` 해제에는 이전 질문 이후 최신 발췌의 실제 철회·취소 근거를 요구하도록 강화했습니다.
+- **2026-11-27 (독립 의도 리뷰 11차 `14272eb7` 지적 3건 반영)**:
+  1. `server/outcome-verifier.ts`에서 `check-runs`·`status` 조회를 `per_page=100` 페이지네이션으로 모두 읽고, `total_count`보다 적게 수집된 불완전 응답은 `unavailable`로 fail-closed 처리하도록 수정했습니다.
+  2. `server/coordinator.ts`에서 대상 이슈 앵커 수집에서 최신 종결 턴(`last`)을 제외해 최신 발췌의 타 이슈(“다른 작업 #999”)가 앵커로 채택되지 않도록 하고, `withdrawn`에 `tentativeOrNegatedWithdrawalPattern`을 추가해 “철회 여부를 확인 중입니다” 같은 검토·미확인 발췌를 차단했습니다.
+  3. `server/coordinator.ts`에서 최종 `wsAfter.refresh()`와 `latestAfter` 확인을 마지막 `managedRowsForCoordinator` 상태 확인보다 앞으로 옮겨, 워크스페이스 재조회 도중 세션이 `running`으로 재개되면 저장을 거절하도록 TOCTOU 순서를 바로잡았습니다.
 
 ## Acceptance criteria
 

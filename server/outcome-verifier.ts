@@ -39,6 +39,7 @@ const rawIssue = z.object({
   url: z.string(),
 });
 const rawCheckRuns = z.object({
+  total_count: z.number().int().nonnegative().optional(),
   check_runs: z.array(z.object({
     status: z.string().nullish(),
     conclusion: z.string().nullish(),
@@ -46,6 +47,7 @@ const rawCheckRuns = z.object({
 });
 const rawCommitStatus = z.object({
   state: z.string().nullish(),
+  total_count: z.number().int().nonnegative().optional(),
   statuses: z.array(z.object({ state: z.string().nullish() })).default([]),
 });
 
@@ -137,19 +139,76 @@ async function resolveRemoteMainAncestry(
   }
 }
 
+const maxCheckPages = 10;
+
+async function fetchAllCheckRuns(
+  repo: string,
+  resolvedSha: string,
+  runner: (command: "git" | "gh", args: string[]) => Promise<string>,
+): Promise<{ runs: { status?: string | null; conclusion?: string | null }[]; complete: boolean }> {
+  const runs: { status?: string | null; conclusion?: string | null }[] = [];
+  let expectedTotal: number | undefined;
+  for (let page = 1; page <= maxCheckPages; page += 1) {
+    const endpoint = page === 1
+      ? `repos/${repo}/commits/${resolvedSha}/check-runs?per_page=100&page=1`
+      : `repos/${repo}/commits/${resolvedSha}/check-runs?per_page=100&page=${page}`;
+    const raw = await runner("gh", ["api", endpoint]);
+    const parsed = rawCheckRuns.parse(JSON.parse(raw));
+    if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
+    runs.push(...parsed.check_runs);
+    if (expectedTotal !== undefined && runs.length >= expectedTotal) {
+      return { runs, complete: true };
+    }
+    if (parsed.check_runs.length === 0) {
+      return { runs, complete: expectedTotal === undefined || runs.length >= expectedTotal };
+    }
+    if (expectedTotal === undefined && parsed.check_runs.length < 100) {
+      return { runs, complete: true };
+    }
+  }
+  return { runs, complete: expectedTotal !== undefined && runs.length >= expectedTotal };
+}
+
+async function fetchAllCommitStatuses(
+  repo: string,
+  resolvedSha: string,
+  runner: (command: "git" | "gh", args: string[]) => Promise<string>,
+): Promise<{ statuses: { state?: string | null }[]; complete: boolean }> {
+  const statuses: { state?: string | null }[] = [];
+  let expectedTotal: number | undefined;
+  for (let page = 1; page <= maxCheckPages; page += 1) {
+    const endpoint = `repos/${repo}/commits/${resolvedSha}/status?per_page=100&page=${page}`;
+    const raw = await runner("gh", ["api", endpoint]);
+    const parsed = rawCommitStatus.parse(JSON.parse(raw));
+    if (parsed.total_count !== undefined) expectedTotal = parsed.total_count;
+    statuses.push(...parsed.statuses);
+    if (expectedTotal !== undefined && statuses.length >= expectedTotal) {
+      return { statuses, complete: true };
+    }
+    if (parsed.statuses.length === 0) {
+      return { statuses, complete: expectedTotal === undefined || statuses.length >= expectedTotal };
+    }
+    if (expectedTotal === undefined && parsed.statuses.length < 100) {
+      return { statuses, complete: true };
+    }
+  }
+  return { statuses, complete: expectedTotal !== undefined && statuses.length >= expectedTotal };
+}
+
 async function lookupCommitChecks(
   repo: string,
   resolvedSha: string,
   runner: (command: "git" | "gh", args: string[]) => Promise<string>,
 ): Promise<CommitCheckStatus> {
   try {
-    const [runsRaw, statusRaw] = await Promise.all([
-      runner("gh", ["api", `repos/${repo}/commits/${resolvedSha}/check-runs`]),
-      runner("gh", ["api", `repos/${repo}/commits/${resolvedSha}/status`]),
+    const [runsResult, statusResult] = await Promise.all([
+      fetchAllCheckRuns(repo, resolvedSha, runner),
+      fetchAllCommitStatuses(repo, resolvedSha, runner),
     ]);
-    const runs = rawCheckRuns.parse(JSON.parse(runsRaw));
-    const status = rawCommitStatus.parse(JSON.parse(statusRaw));
-    return summarizeCommitChecks(runs.check_runs, status.statuses);
+    const summary = summarizeCommitChecks(runsResult.runs, statusResult.statuses);
+    if (summary === "failed" || summary === "pending") return summary;
+    if (!runsResult.complete || !statusResult.complete) return "unavailable";
+    return summary;
   } catch {
     return "unavailable";
   }
