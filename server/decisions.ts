@@ -61,13 +61,9 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
   const currentQuestion = matched?.kind === "question" ? matched : undefined;
   const structured = currentQuestion?.evidenceId === row.evidenceId ? currentQuestion : undefined;
   const pending = matched?.openQuestions ?? (matched?.openQuestion ? [matched.openQuestion] : []);
-  // A progress update leaves the current question open ahead of older questions.
-  let carried = currentQuestion ? undefined : pending.at(-1);
-  if (currentQuestion && !structured) {
-    const question = currentQuestion.content?.question ?? currentQuestion.text;
-    const repeated = evidence && lastConversationQuestion(evidence, row.id === prefs.coordinator)?.question === question;
-    if (row.lane !== "human" || repeated) carried = { ...currentQuestion, question };
-  }
+  const carried = currentQuestion
+    ? (structured ? undefined : { ...currentQuestion, question: currentQuestion.content?.question })
+    : pending.at(-1);
   let content: Omit<Decision, "version">;
   let questionEvidenceId: string | undefined;
   if (row.nativePending) {
@@ -75,8 +71,9 @@ export function decorateDecision(row: SessionRow, note: Note | undefined, prefs:
   } else if (carried?.text && row.status === "idle" && row.evidenceId && !dismissed && !row.boardFact?.current) {
     content = { ...carried.content, source: "coordinator", question: carried.question ?? carried.text };
     questionEvidenceId = carried.evidenceId;
+    // A newly detected question remains visible as evidence until it is classified.
+    if (row.lane !== "human") row.detail = "코디네이터 판단 · " + content.question;
     row.lane = "human";
-    row.detail = "코디네이터 판단 · " + content.question;
     row.decisionRequestedAt = carried.requestedAt;
   } else if (row.status === "idle" && row.evidenceId && !dismissed && row.lane === "human") {
     content = structured

@@ -24,6 +24,7 @@ import { reportingKey, type Note, type SessionRow } from "../../shared/contract"
 import { decisionCount, displayLane } from "../../shared/decision-count";
 import contribute from "../../index.server";
 import { projectCards } from "../../client/model";
+import { decisionSummary } from "../../client/decision-summary";
 import { boardSnapshot } from "../../shared/contract";
 import { sendDecision } from "../../shared/decision-actions";
 import { legacyRouter } from "../legacy-router";
@@ -276,12 +277,19 @@ test.each(["single question", "older question carried"])("progress updates prese
   expect((await card())?.session).toMatchObject({evidenceId: progress.evidenceId,
     decision: {...content, evidenceId, version, source: "coordinator"}});
 
-  append(content.question);
-  expect((await card())?.session.decision).toMatchObject({...content, version, source: "coordinator"});
-  append("어느 표기 형식을 선택하시겠어요?");
-  expect((await card())?.session.decision).toMatchObject({source: "conversation", question: "어느 표기 형식을 선택하시겠어요?"});
-  append("1단계 검증 메모를 저장했습니다.");
+  const reworded = older ? "표지에 넣을 파일의 위치를 알려 주실 수 있나요?" : "공식 안전 문구 원본과 저작권 표기 기준을 알려 주실 수 있나요?";
+  for (const update of [
+    content.question,
+    `${content.question}\n1단계 검증 자료는 정리했습니다.`,
+    reworded,
+    "상태 공유입니다. 요청할 결정은 없습니다.",
+  ]) {
+    append(update);
+    expect((await card())?.session.decision).toMatchObject({...content, version, evidenceId, source: "coordinator"});
+  }
 
+  append(reworded);
+  expect(decisionSummary((await card())!, text => text).evidence.join("\n")).toContain(reworded);
   const answer = {projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
     text: "첨부한 자료를 사용하세요.", requestKey: "reply-after-progress", version};
   const worker = f.agents.find(a => a.id === sessionId)!;
@@ -306,6 +314,46 @@ test.each(["single question", "older question carried"])("progress updates prese
   await classify({evidenceId: resolved.evidenceId, kind: "idle", text: "남은 결정 없음", questionAnswer});
   expect(await card()).toBeUndefined();
   expect(f.prefs.read().judgments[sessionId]).toMatchObject({kind: "idle", evidenceId: resolved.evidenceId});
+});
+
+test("a distinct inferred question is visible before classification and gains its own reply version when registered", async () => {
+  const f = await openIssueBoard();
+  const sessionId = "w305";
+  const {read, classify, append} = sessionTools(f, sessionId);
+  const board = f.board();
+  const card = async () => projectCards(await board.snapshot()).human.find(c => c.session.id === sessionId);
+  const question = "공식 원문을 알려 주실 수 있나요?";
+  append(question);
+  expect((await card())?.session.decision).toMatchObject({source: "conversation", question});
+  const original = await read();
+  const content = {question, needsInput: "공식 원문"};
+  await classify({evidenceId: original.evidenceId, kind: "question", text: question, content});
+  const originalVersion = (await card())!.session.decision!.version;
+
+  const distinct = "어느 표기 형식을 선택하시겠어요?";
+  append(distinct);
+  const detected = (await card())!;
+  expect(detected.session.decision).toMatchObject({...content, version: originalVersion});
+  expect(decisionSummary(detected, text => text).evidence.join("\n")).toContain(distinct);
+  const latest = await read();
+  await classify({evidenceId: latest.evidenceId, kind: "question", text: distinct, content: {question: distinct}});
+  const newDecision = (await card())!.session.decision!;
+  expect(newDecision).toMatchObject({source: "coordinator", question: distinct});
+  expect(newDecision.version).not.toBe(originalVersion);
+  expect(f.prefs.read().judgments[sessionId].openQuestions).toMatchObject([{evidenceId: original.evidenceId, content}]);
+
+  const answer = {projectId: "easydocs", sessionId, recipientId: sessionId, action: "reply",
+    text: "두 번째 표기 형식을 선택합니다.", requestKey: "reply-to-distinct-question"};
+  await expect(board.reply({...answer, version: originalVersion})).rejects.toThrow(/바뀌었습니다/);
+  await expect(board.reply({...answer, version: newDecision.version})).resolves.toMatchObject({recipientId: sessionId});
+  expect(JSON.parse(f.sent[0].text.split("\n")[1])).toMatchObject({evidenceId: latest.evidenceId,
+    revision: newDecision.version, questions: [{id: newDecision.version, text: distinct}]});
+
+  append({role: "user", text: answer.text}, "표기 형식을 기록했습니다.");
+  const reviewed = await read();
+  await classify({evidenceId: reviewed.evidenceId, kind: "review", text: "#305 1단계 검증 확인",
+    questionAnswer: {questionEvidenceId: latest.evidenceId, replyId: reviewed.userReplies.at(-1).replyId}});
+  expect((await card())?.session.decision).toMatchObject({...content, version: originalVersion, evidenceId: original.evidenceId});
 });
 
 test("same excerpt permits supplementing needsInput while rejecting a replacement question", async () => {
