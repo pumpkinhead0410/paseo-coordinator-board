@@ -11,21 +11,11 @@ import { replyDetails } from "../shared/reply-history";
 import { factSchema } from "../shared/board-facts";
 
 const commitHash = z.string().trim().regex(/^[0-9a-f]{7,40}$/i);
-const submittedVerificationSchema = z.discriminatedUnion("source", [
-  z.object({
-    source: z.literal("ci"),
-    status: z.literal("passed"),
-    summary: z.string().trim().min(1).max(300),
-  }),
-  z.object({
-    source: z.literal("local"),
-    status: z.literal("passed"),
-    command: z.string().trim().min(1).max(300),
-    exitCode: z.literal(0),
-    receiptPath: z.string().trim().min(1).max(300),
-    summary: z.string().trim().min(1).max(300),
-  }),
-]);
+const submittedVerificationSchema = z.object({
+  source: z.literal("ci"),
+  status: z.literal("passed"),
+  summary: z.string().trim().min(1).max(300),
+});
 const storedVerificationSchema = z.object({
   source: z.enum(["ci", "local"]),
   status: z.literal("passed"),

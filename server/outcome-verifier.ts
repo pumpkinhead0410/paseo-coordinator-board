@@ -1,6 +1,5 @@
 import { execCommand } from "@getpaseo/plugin/server";
-import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { repositorySlug } from "../shared/prs";
 
@@ -24,19 +23,9 @@ export type CommitVerification = {
   resolvedSha?: string;
   checks: CommitCheckStatus;
 };
-export type LocalVerificationRequest = {
-  command: string;
-  exitCode: 0;
-  receiptPath: string;
-};
 export type OutcomeVerifier = {
   verifyIssue(repo: string, issue: number): Promise<IssueOutcome>;
   verifyMainCommit(workspacePath: string | undefined, repo: string, commit: string): Promise<CommitVerification>;
-  verifyLocalReceipt?(
-    workspacePath: string | undefined,
-    resolvedSha: string,
-    verification: LocalVerificationRequest,
-  ): Promise<boolean>;
 };
 
 const commitHashPattern = /^[0-9a-f]{7,40}$/i;
@@ -137,12 +126,6 @@ export function summarizeCommitChecks(
 
 const rawCommitMeta = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/i),
-});
-const localReceiptFileSchema = z.object({
-  commit: z.string().trim().regex(/^[0-9a-f]{7,40}$/i),
-  command: z.string().trim().min(1).max(300),
-  exitCode: z.literal(0),
-  status: z.literal("passed"),
 });
 
 async function resolveRemoteMainAncestry(
@@ -360,31 +343,6 @@ export function createOutcomeVerifier(
       }
       const checks = await lookupCommitChecks(parsedRepo.data, resolved.resolvedSha, runner);
       return { onMain: true, resolvedSha: resolved.resolvedSha, checks };
-    },
-
-    async verifyLocalReceipt(
-      workspacePath: string | undefined,
-      resolvedSha: string,
-      verification: LocalVerificationRequest,
-    ): Promise<boolean> {
-      if (!workspacePath || !isAbsolute(workspacePath)) return false;
-      const rel = verification.receiptPath.trim();
-      if (!rel || isAbsolute(rel) || rel.includes("\0")) return false;
-      try {
-        const rootReal = await realpath(workspacePath);
-        const candidate = resolve(rootReal, rel);
-        const targetReal = await realpath(candidate);
-        const inside = relative(rootReal, targetReal);
-        if (!inside || inside.startsWith("..") || isAbsolute(inside)) return false;
-        const raw = await readFile(targetReal, "utf8");
-        const parsed = localReceiptFileSchema.parse(JSON.parse(raw));
-        const fullSha = resolvedSha.trim().toLowerCase();
-        const fileSha = parsed.commit.trim().toLowerCase();
-        if (!/^[0-9a-f]{40}$/.test(fullSha) || !fullSha.startsWith(fileSha)) return false;
-        return parsed.command.trim() === verification.command.trim() && parsed.exitCode === 0 && parsed.status === "passed";
-      } catch {
-        return false;
-      }
     },
   };
 }

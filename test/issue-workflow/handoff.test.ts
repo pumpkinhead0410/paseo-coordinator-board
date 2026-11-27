@@ -208,7 +208,7 @@ test("plan_board_assignment exposes workspace kind, branch, path and session wor
 });
 
 test("#308 reproduction: structured receipt verification blocks unverified completions and clears pre-integration wait once verified", async () => {
-  const { prefs, notes, agents, timelines, issueStates, commitStates, run } = await openIssueBoard();
+  const { prefs, notes, agents, timelines, issueStates, commitStates, tool, run } = await openIssueBoard();
   const w308 = agents.find(a => a.id === "w308")!;
 
   // 1. Pre-integration state: worker reported H1 review note (with reference issue #999) and coordinator classified review wait.
@@ -372,7 +372,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, receiptPath: "manifest.json", summary: "D155 로컬 통과" } },
+    receipt: baseReceipt,
   })).rejects.toThrow(/검증 상태가 failed/);
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "unavailable" });
@@ -382,15 +382,15 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
     kind: "idle",
     text: "#308 완료",
     receipt: baseReceipt,
-  })).rejects.toThrow(/통과된 CI 체크를 확인할 수 없어/);
-  // Local verification without a verified local receipt file (commit + command + exitCode 0) is rejected fail-closed!
-  await expect(run("classify_board_conversation", {
+  })).rejects.toThrow(/통과된 GitHub 체크를 확인할 수 없어/);
+  // Unauthenticated local verification claims are rejected by schema/verification fail-closed (no hand-written workspace JSON bypass)!
+  expect(() => tool("classify_board_conversation").input.parse({
     sessionId: "w308",
     evidenceId: latestExcerpt.evidenceId,
     kind: "idle",
     text: "#308 완료",
-    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", command: "D155", exitCode: 0, receiptPath: "manifest.json", summary: "D155 로컬 통과" } },
-  })).rejects.toThrow(/로컬 검증 영수증 파일/);
+    receipt: { ...baseReceipt, verification: { source: "local", status: "passed", summary: "로컬 통과" } },
+  })).toThrow();
 
   commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
   commitStates.set("acme/easydocs@e9fe346", { onMain: true, resolvedSha: "e9fe346000000000000000000000000000000000", checks: "passed" });
@@ -807,41 +807,6 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only 
     resolvedSha: "cf6f661000000000000000000000000000000000",
     checks: "passed",
   });
-  // Verify local JSON receipt file checks: exact SHA + command + exitCode 0 + workspace containment!
-  const receiptWorkspace = mkdtempSync(join(tmpdir(), "board-local-receipt-"));
-  dirs.push(receiptWorkspace);
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(
-    join(receiptWorkspace, "manifest.json"),
-    JSON.stringify({ commit: "cf6f661", command: "npm test", exitCode: 0, status: "passed" }),
-  );
-  writeFileSync(
-    join(receiptWorkspace, "old-manifest.json"),
-    JSON.stringify({ commit: "e9fe346", command: "npm test", exitCode: 0, status: "passed" }),
-  );
-  expect(
-    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
-      command: "npm test",
-      exitCode: 0,
-      receiptPath: "manifest.json",
-    }),
-  ).toBe(true);
-  // Prior commit e9fe346 receipt cannot validate cf6f661!
-  expect(
-    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
-      command: "npm test",
-      exitCode: 0,
-      receiptPath: "old-manifest.json",
-    }),
-  ).toBe(false);
-  // Path traversal or missing file fails closed!
-  expect(
-    await verifier.verifyLocalReceipt!(receiptWorkspace, "cf6f661000000000000000000000000000000000", {
-      command: "npm test",
-      exitCode: 0,
-      receiptPath: "../manifest.json",
-    }),
-  ).toBe(false);
   expect(calls.every(c => c.startsWith("gh "))).toBe(true);
 });
 

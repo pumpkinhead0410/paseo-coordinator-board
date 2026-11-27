@@ -304,17 +304,8 @@ export async function verifyIdleClassification(
   if (commitOutcome.checks === "failed" || commitOutcome.checks === "pending") {
     return `통합 커밋(${receipt.commit})의 검증 상태가 ${commitOutcome.checks}여서 검증 대기를 idle로 내릴 수 없습니다.`;
   }
-  if (receipt.verification.source === "ci" && commitOutcome.checks !== "passed") {
-    return `통합 커밋(${receipt.commit})의 통과된 CI 체크를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다(현재 상태: ${commitOutcome.checks}).`;
-  }
-  if (receipt.verification.source === "local" && commitOutcome.checks !== "passed") {
-    const verified =
-      commitOutcome.resolvedSha && verifier.verifyLocalReceipt
-        ? await verifier.verifyLocalReceipt(context.workspacePath, commitOutcome.resolvedSha, receipt.verification)
-        : false;
-    if (!verified) {
-      return `로컬 검증 영수증 파일(${receipt.verification.receiptPath})에서 대상 커밋(${receipt.commit})·명령(${receipt.verification.command})·exitCode 0 통과를 확인할 수 없어 검증 대기를 idle로 내릴 수 없습니다.`;
-    }
+  if (commitOutcome.checks !== "passed") {
+    return `통합 커밋(${receipt.commit})의 통과된 GitHub 체크를 확인할 수 없어 검증 대기를 자동으로 idle로 내릴 수 없습니다(현재 상태: ${commitOutcome.checks}). CI 체크가 없는 저장소에서는 확인 대기(review)로 두고 사람이 직접 확인해 주세요.`;
   }
   return null;
 }
@@ -390,7 +381,7 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}|{source:'local', status:'passed', command, exitCode:0, receiptPath, summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and commit verification fail-closed; never clear a pending verification wait without verified receipts. Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
