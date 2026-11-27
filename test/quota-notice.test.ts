@@ -98,3 +98,44 @@ test("an explicit provider limit without a reset keeps recovery unknown",async()
   const f=fixture(); f.tail.text="⚠ Individual quota reached.";
   expect(await f.poll()).toContain("회복: 미확인");
 });
+
+test("a coordinator quotation in the current turn is not a provider interruption", async () => {
+  const f = fixture();
+  f.page.entries.unshift({seqEnd:0, turnId:"current", item:{type:"tool_call", name:"agent_message",
+    status:"completed", callId:"paseo-agent-message:quoted", agentMessage:{event:"message", sender:{id:"coord"}, text:warning}}});
+  f.page.entries.at(-1).turnId = "current";
+  expect(await f.poll()).toBeNull();
+});
+
+test("an earlier turn's quotation does not suppress a new interruption", async () => {
+  const f = fixture();
+  f.page.entries.unshift({seqEnd:0, turnId:"prior", item:{type:"user_message",text:warning}});
+  f.page.entries.at(-1).turnId = "current";
+  expect(await f.poll()).toContain("사용량 한도");
+});
+
+test("an untagged warning cannot inherit a tagged turn's commit", async () => {
+  const f = fixture();
+  f.page.entries[0].turnId = "prior";
+  f.page.entries[0].item = {type:"tool_call",name:"shell",status:"completed",
+    detail:{type:"shell",command:"git commit -m prior",exitCode:0,output:"[main 12abcde] prior"}};
+  expect(await f.poll()).toContain("마지막 확인 작업: 미확인 · 커밋: 미확인");
+});
+
+test("Antigravity history replay keeps the observed input identity and relative reset", async () => {
+  const f = fixture();
+  const input = {seqEnd:0, item:{type:"tool_call", name:"agent_message", callId:"paseo-agent-message:request",
+    status:"completed", agentMessage:{event:"message",sender:{id:"coord"},text:"review"}}};
+  f.page.entries.unshift(input);
+  const end = f.page.entries.at(-1);
+  end.turnId = "acp:request";
+  expect(await f.poll()).toContain("03:49:33");
+  delete end.turnId;
+  end.item.messageId = "replayed";
+  for (const entry of f.page.entries) entry.timestamp = "2026-11-27T09:11:22Z";
+  expect(await f.poll()).toBeNull();
+  input.item.callId = "paseo-agent-message:another";
+  const next = await f.poll();
+  expect(next).toContain("2h49m33s");
+  expect(next).not.toContain("예상");
+});

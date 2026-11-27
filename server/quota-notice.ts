@@ -23,9 +23,9 @@ export function quotaEvidence(page: Timeline) {
   const match = item.type === "assistant_message" && individual.exec(item.text.trim());
   const error = item.type === "error" && nativeError.test(item.message.trim());
   if (!match && !error) return;
-  const lastInput = page.entries.findLast(({ item }) => item.type === "user_message")?.item;
-  if (match && lastInput?.type === "user_message" && lastInput.text.includes(match[0])) return;
-  const at = Date.parse(end.timestamp);
+  // Rehydrated ACP history may give every entry the replay timestamp.
+  const replayClock = !end.turnId && page.entries.length > 1 && page.entries.every(e => e.timestamp === end.timestamp);
+  const at = replayClock ? NaN : Date.parse(end.timestamp);
   let reset = "미확인";
   if (match && match[1]) {
     const ms = ((Number(match[2] || 0) * 60 + Number(match[3] || 0)) * 60 + Number(match[4] || 0)) * 1000;
@@ -36,17 +36,31 @@ export function quotaEvidence(page: Timeline) {
     reset = /\b(?:try again|resets?) at ([^\n]{1,100}?)[.!]?$/i.exec(item.message.trim())?.[1] ?? reset;
   }
   let step = "미확인", commit = "미확인";
+  let incidentTurn = end.turnId;
   for (const { item, turnId } of page.entries.slice(0, -1).reverse()) {
-    if ((turnId && end.turnId && turnId !== end.turnId) || item.type === "user_message") break;
+    if (turnId && turnId !== end.turnId) break;
+    if (item.type === "user_message") {
+      if (match && item.text.includes(match[0])) return;
+      break;
+    }
+    if (item.type === "tool_call" && item.agentMessage) {
+      if (match && item.agentMessage.text.includes(match[0])) return;
+      const prefix = "paseo-agent-message:";
+      if (match && !incidentTurn && item.callId.startsWith(prefix)) {
+        incidentTurn = "acp:" + item.callId.slice(prefix.length);
+      }
+      break;
+    }
+    if (item.type === "tool_call" && item.name === "heartbeat") break;
     if (item.type !== "tool_call" || item.status !== "completed") continue;
     const d = item.detail;
     if (step === "미확인") step = d && "filePath" in d ? `${item.name} · ${basename(d.filePath)}` : item.name;
-    if (d?.type === "shell" && d.exitCode === 0 && /^git (?:commit\b|rev-parse HEAD$)/.test(d.command)) {
+    if (commit === "미확인" && d?.type === "shell" && d.exitCode === 0 && /^git (?:commit\b|rev-parse HEAD$)/.test(d.command)) {
       const sha = /^\[[^\]\n]+ ([0-9a-f]{7,40})\] /m.exec(d.output ?? "")?.[1] ?? /^([0-9a-f]{40})$/.exec(d.output?.trim() ?? "")?.[1];
-      if (sha) { commit = sha; break; }
+      if (sha) commit = sha;
     }
   }
-  const key = end.turnId ? JSON.stringify(["turn", end.turnId]) : JSON.stringify([end.timestamp,
+  const key = incidentTurn ? JSON.stringify(["turn", incidentTurn]) : JSON.stringify([end.timestamp,
     item.type === "assistant_message" && item.messageId ? item.messageId : end.seqEnd]);
   return { key, reset, step, commit, antigravity: !!match };
 }
