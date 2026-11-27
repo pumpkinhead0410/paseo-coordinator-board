@@ -1,6 +1,5 @@
 import { execCommand } from "@getpaseo/plugin/server";
-import { stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { repositorySlug } from "../shared/prs";
 
@@ -32,7 +31,7 @@ const failingConclusions = new Set([
   "STARTUP_FAILURE",
   "STALE",
 ]);
-const greenConclusions = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+const nonFailingConclusions = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
 const rawIssue = z.object({
   state: z.enum(["OPEN", "CLOSED"]),
@@ -102,40 +101,18 @@ export function summarizeCommitChecks(
     const state = status.state?.trim().toUpperCase() ?? "";
     if (state === "PENDING" || state === "EXPECTED") return "pending";
   }
+  let hasSuccess = false;
   for (const run of checkRuns) {
     const conclusion = run.conclusion?.trim().toUpperCase() ?? "";
-    if (!greenConclusions.has(conclusion)) return "failed";
+    if (!nonFailingConclusions.has(conclusion)) return "failed";
+    if (conclusion === "SUCCESS") hasSuccess = true;
   }
   for (const status of commitStatuses) {
     const state = status.state?.trim().toUpperCase() ?? "";
     if (state !== "SUCCESS") return "failed";
+    hasSuccess = true;
   }
-  return "passed";
-}
-
-async function resolveLocalMainAncestry(
-  workspacePath: string | undefined,
-  commit: string,
-  runner: (command: "git" | "gh", args: string[]) => Promise<string>,
-): Promise<{ onMain: boolean; resolvedSha?: string } | null> {
-  if (!workspacePath || !isAbsolute(workspacePath)) return null;
-  try {
-    const marker = await stat(join(workspacePath, ".git"));
-    if (!marker.isFile() && !marker.isDirectory()) return null;
-    const resolvedSha = (await runner("git", ["-C", workspacePath, "rev-parse", "--verify", `${commit}^{commit}`])).trim().toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(resolvedSha)) return null;
-    for (const ref of ["origin/main", "main", "origin/master", "master"]) {
-      try {
-        await runner("git", ["-C", workspacePath, "merge-base", "--is-ancestor", resolvedSha, ref]);
-        return { onMain: true, resolvedSha };
-      } catch {
-        continue;
-      }
-    }
-    return { onMain: false, resolvedSha };
-  } catch {
-    return null;
-  }
+  return hasSuccess ? "passed" : "unavailable";
 }
 
 async function resolveRemoteMainAncestry(
@@ -212,16 +189,15 @@ export function createOutcomeVerifier(
       }
     },
 
-    async verifyMainCommit(workspacePath: string | undefined, repo: string, commit: string): Promise<CommitVerification> {
+    async verifyMainCommit(_workspacePath: string | undefined, repo: string, commit: string): Promise<CommitVerification> {
       const parsedRepo = repositorySlug.safeParse(repo);
       const trimmed = commit.trim();
       if (!parsedRepo.success || !commitHashPattern.test(trimmed)) {
         return { onMain: false, checks: "unavailable" };
       }
-      const local = await resolveLocalMainAncestry(workspacePath, trimmed, runner);
-      const resolved = local?.onMain ? local : await resolveRemoteMainAncestry(parsedRepo.data, trimmed, runner);
+      const resolved = await resolveRemoteMainAncestry(parsedRepo.data, trimmed, runner);
       if (!resolved.onMain || !resolved.resolvedSha) {
-        return { onMain: false, resolvedSha: resolved.resolvedSha ?? local?.resolvedSha, checks: "unavailable" };
+        return { onMain: false, resolvedSha: resolved.resolvedSha, checks: "unavailable" };
       }
       const checks = await lookupCommitChecks(parsedRepo.data, resolved.resolvedSha, runner);
       return { onMain: true, resolvedSha: resolved.resolvedSha, checks };

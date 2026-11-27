@@ -102,6 +102,10 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 9차 `14272eb7` 근본 구조 전환)**:
   - 자유 문장 정규식 대조의 구조적 한계(조건부 종료, 타 커밋 검증, 별도 작업 대기 문구 혼입)를 제거하기 위해 `classify_board_conversation`에 구조화된 `receipt`(`completed`·`not_planned`·`withdrawn`)와 실/주입 가능 `OutcomeVerifier`(`server/outcome-verifier.ts`)를 도입했습니다(`server/preferences.ts`, `server/coordinator.ts`).
   - `completed` 영수증은 대상 저장소(`owner/repo`)·세션 앵커 이슈 번호·GitHub 이슈 `CLOSED`/`COMPLETED`·커밋 `main` 조상 여부·`verifiedCommit === commit`·커밋 체크(`passed`, 실패/대기 시 거절)를 결정적으로 검증하고, 정리 인계(`cleanupHandoff`)와 별도 작업 서술을 제품 증빙 판정에서 완전히 분리합니다. `not_planned` 영수증은 통합 커밋 없이 대상 이슈의 GitHub `CLOSED`/`NOT_PLANNED`를 직접 검증합니다.
+- **2026-11-27 (독립 의도 리뷰 10차 `14272eb7` 지적 3건 반영)**:
+  1. `server/outcome-verifier.ts`에서 로컬 `main` 분기 대신 원격 GitHub `compare/main...<sha>`로만 반영 여부를 확인하고, `summarizeCommitChecks`가 `SKIPPED`/`NEUTRAL`만 있는 체크를 `passed`로 인정하지 않고 최소 1건의 실제 `SUCCESS`를 요구하도록 수정했습니다.
+  2. `server/coordinator.ts`에서 비동기 검증 뒤 워크스페이스 원격(`remoteUrl`)·보고 판본(`notes` `revision`)·기존 판단(`evidenceId`/`kind`)을 저장 직전에 재대조해 검증 중 새 질문 도착이나 원격 변경 TOCTOU를 차단했습니다.
+  3. 대상 이슈 앵커를 제목·워크스페이스·이전 판단·대화 발췌 순으로 확보하되 앵커가 전혀 없으면 fail-closed로 거절하고, `withdrawn`과 열린 질문의 `idle` 해제에는 이전 질문 이후 최신 발췌의 실제 철회·취소 근거를 요구하도록 강화했습니다.
 
 ## Acceptance criteria
 

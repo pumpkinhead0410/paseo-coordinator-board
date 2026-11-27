@@ -11,6 +11,8 @@ import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
 const integrationReviewContextPattern = /통합|병합|머지|최종\s*검증|검증\s*대기|CI|회귀|\b(?:merge|integrat|verif|ci)\b/i;
+const withdrawalEvidencePattern = /요청\s*철회|철회(?:를|가|됨|됐|했|확인)|취소(?:를|가|됨|됐|했|확인)|진행하지\s*않|자료\s*대기\s*없이|더\s*이상\s*필요\s*없|\b(?:withdrawn|withdraw|cancelled|canceled|no\s+longer\s+needed)\b/i;
+const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
 const referenceIssuePattern = /(?:참고|관련|연관|이전|선행|후행|별도|별개|제외|대신|see|refs?|related(?:\s+to)?|duplicate\s+of|blocked\s+by)\s*(?:이슈|issue)?\s*(?:https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)/gi;
 
 function extractAnchoredIssues(text: string): Set<number> {
@@ -46,8 +48,10 @@ export async function verifyIdleClassification(
   input: { text: string; receipt?: CompletionReceipt },
   context: {
     previousKind?: "question" | "review" | "idle";
+    previousEvidenceId?: string;
     previousText?: string;
     activeNoteKind?: "question" | "review" | "done" | "clear";
+    activeNoteEvidenceId?: string;
     activeNoteText?: string;
     sessionTitle?: string;
     workspaceTitle?: string;
@@ -64,7 +68,29 @@ export async function verifyIdleClassification(
   const hasIntegrationReviewWait =
     (context.previousKind === "review" && integrationReviewContextPattern.test(context.previousText ?? "")) ||
     (context.hasActiveAgentNote && context.activeNoteKind === "review");
+  const hasOpenQuestion =
+    context.previousKind === "question" || (context.hasActiveAgentNote && context.activeNoteKind === "question");
   const requiresReceipt = !!input.receipt || hasIntegrationReviewWait || context.hasActiveAgentNote || claimsCompletion;
+
+  if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasIntegrationReviewWait && !claimsCompletion) {
+    if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
+      return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
+    }
+    const priorQuestionEvidenceId = context.activeNoteKind === "question"
+      ? context.activeNoteEvidenceId
+      : context.previousKind === "question"
+        ? context.previousEvidenceId
+        : undefined;
+    if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
+      return "열린 질문과 같은 발췌에서는 요청 철회로 idle 전환할 수 없습니다. 사용자 철회 이후 최신 발췌를 확인하세요.";
+    }
+    const trimmedLast = last.text.trim();
+    if (!withdrawalEvidencePattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
+      return "최신 발췌에서 원래 요청의 철회·취소 근거를 확인할 수 없어 열린 질문을 idle로 해제할 수 없습니다.";
+    }
+    return null;
+  }
+
   if (!requiresReceipt) return null;
 
   if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
@@ -80,6 +106,10 @@ export async function verifyIdleClassification(
     if (hasIntegrationReviewWait || claimsCompletion) {
       return "통합 검증 대기나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
+    const trimmedLast = last.text.trim();
+    if (!withdrawalEvidencePattern.test(trimmedLast) || stillAskingPattern.test(trimmedLast)) {
+      return "최신 발췌에서 원래 요청의 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
+    }
     return null;
   }
 
@@ -91,10 +121,17 @@ export async function verifyIdleClassification(
   }
 
   const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
+  const proseAnchorIssues = extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
+  const turnIssues = extractAnchoredIssues(latest.turns.map(turn => turn.text).join(" "));
   const anchoredIssues = structuralIssues.size > 0
     ? structuralIssues
-    : extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
-  if (anchoredIssues.size > 0 && !anchoredIssues.has(receipt.issue)) {
+    : proseAnchorIssues.size > 0
+      ? proseAnchorIssues
+      : turnIssues;
+  if (anchoredIssues.size === 0) {
+    return `세션 제목·워크스페이스·이전 판단·대화 발췌에서 대상 이슈 번호를 확인할 수 없어 #${receipt.issue} 영수증을 대조할 수 없습니다.`;
+  }
+  if (!anchoredIssues.has(receipt.issue)) {
     return `영수증 이슈(#${receipt.issue})가 대상 세션의 이슈(${[...anchoredIssues].map(n => `#${n}`).join(", ")})와 일치하지 않아 idle로 분류할 수 없습니다.`;
   }
 
@@ -226,7 +263,12 @@ export function attachCoordinatorTools(
         currentNote.kind !== "clear" &&
         !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, currentNote, beforeScope);
 
+      const beforeNoteRevision = currentNote?.revision;
+      const beforeJudgmentEvidenceId = beforePreviousSameProject?.evidenceId;
+      const beforeJudgmentKind = beforePreviousSameProject?.kind;
+
       let verifiedExpectedRepo: string | undefined;
+      let afterWorkspaceRepo: string | undefined;
       if (input.kind === "idle") {
         const ws = row.workspaceId ? await paseo.workspaces.ref(row.workspaceId).refresh().catch(() => null) : null;
         const savedRepo = Object.hasOwn(beforeScope.projectRepositories, row.projectId) ? beforeScope.projectRepositories[row.projectId] : undefined;
@@ -238,8 +280,10 @@ export function attachCoordinatorTools(
           { text: input.text, receipt: input.receipt },
           {
             previousKind: beforePreviousSameProject?.kind,
+            previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
             activeNoteKind: beforeActiveAgentNote ? currentNote?.kind : undefined,
+            activeNoteEvidenceId: beforeActiveAgentNote ? currentNote?.evidenceId : undefined,
             activeNoteText: beforeActiveAgentNote ? currentNote?.text : undefined,
             sessionTitle: row.title,
             workspaceTitle: row.workspaceTitle,
@@ -254,6 +298,9 @@ export function attachCoordinatorTools(
         const rowsAfter = await managedRowsForCoordinator(paseo, prefs, agent.id);
         const rowAfter = rowsAfter.find(r => r.id === input.sessionId);
         if (!rowAfter) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
+        if (rowAfter.projectId !== row.projectId || rowAfter.workspaceId !== row.workspaceId) {
+          throw new Error("분류 검증 중 세션의 프로젝트 또는 워크스페이스가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+        }
         if (rowAfter.nativePending) throw new Error("권한 응답 대기 중인 세션은 분류할 수 없습니다. 권한 요청을 먼저 확인해 주세요.");
         if (rowAfter.status === "running" || rowAfter.lane === "running") {
           throw new Error("실행 중인 세션은 분류할 수 없습니다. 대기 상태(idle)로 바뀐 뒤 최신 evidenceId를 다시 읽어 재분류하세요.");
@@ -263,6 +310,8 @@ export function attachCoordinatorTools(
         if (!latestAfter?.turns.length || latestAfter.id !== input.evidenceId) {
           throw new Error("대화가 바뀌었습니다. 최신 발췌를 다시 확인하세요.");
         }
+        const wsAfter = rowAfter.workspaceId ? await paseo.workspaces.ref(rowAfter.workspaceId).refresh().catch(() => null) : null;
+        afterWorkspaceRepo = rowAfter.workspacePull?.repo ?? rowAfter.projectRepo ?? githubRepository(wsAfter?.gitRuntime?.remoteUrl) ?? undefined;
       }
 
       prefs.change(scope => {
@@ -271,11 +320,24 @@ export function attachCoordinatorTools(
         const previousSameProject = previous?.projectId === row.projectId ? previous : undefined;
         const isClarificationReply = !!latest.lastInputIds?.some(id => scope.clarifications?.[id]);
         const latestNote = notes?.visible(new Set([row.id]))[row.id];
-        if (input.kind === "idle" && (input.receipt?.kind === "completed" || input.receipt?.kind === "not_planned")) {
-          const currentSavedRepo = Object.hasOwn(scope.projectRepositories, row.projectId) ? scope.projectRepositories[row.projectId] : undefined;
-          const currentExpectedRepo = currentSavedRepo?.mode === "manual" ? currentSavedRepo.repo : verifiedExpectedRepo;
-          if (!currentExpectedRepo || input.receipt.repo.toLowerCase() !== currentExpectedRepo.toLowerCase()) {
-            throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+        if (input.kind === "idle") {
+          if (latestNote?.revision !== beforeNoteRevision) {
+            throw new Error("분류 검증 중 세션 보고가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+          }
+          if (previousSameProject?.evidenceId !== beforeJudgmentEvidenceId || previousSameProject?.kind !== beforeJudgmentKind) {
+            throw new Error("분류 검증 중 기존 판단이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+          }
+          if (input.receipt?.kind === "completed" || input.receipt?.kind === "not_planned") {
+            const currentSavedRepo = Object.hasOwn(scope.projectRepositories, row.projectId) ? scope.projectRepositories[row.projectId] : undefined;
+            const currentExpectedRepo = currentSavedRepo?.mode === "manual" ? currentSavedRepo.repo : afterWorkspaceRepo;
+            if (
+              !currentExpectedRepo ||
+              !verifiedExpectedRepo ||
+              currentExpectedRepo.toLowerCase() !== verifiedExpectedRepo.toLowerCase() ||
+              input.receipt.repo.toLowerCase() !== currentExpectedRepo.toLowerCase()
+            ) {
+              throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
+            }
           }
         }
         if (

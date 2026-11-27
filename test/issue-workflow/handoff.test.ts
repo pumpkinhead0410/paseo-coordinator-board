@@ -36,7 +36,7 @@ type MockAgent = {
   pendingPermissions: { id: string }[];
 };
 
-async function openIssueBoard() {
+async function openIssueBoard(options: { onVerifyIssue?: () => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "board-issue-workflow-"));
   dirs.push(dir);
   const prefs = new PreferenceStore(join(dir, "scope.json"));
@@ -90,6 +90,7 @@ async function openIssueBoard() {
 
   const verifier: OutcomeVerifier = {
     async verifyIssue(repo, issue) {
+      options.onVerifyIssue?.();
       return issueStates.get(`${repo.toLowerCase()}#${issue}`) ?? { state: "UNKNOWN", stateReason: "UNKNOWN" };
     },
     async verifyMainCommit(_workspacePath, repo, commit) {
@@ -147,7 +148,7 @@ async function openIssueBoard() {
   const run = async (name: string, input: Record<string, unknown> = {}) =>
     (await tool(name).execute(input, { paseo: sdk, agent: { id: "coord" } })).text;
 
-  return { prefs, notes, agents, timelines, issueStates, commitStates, tool, run };
+  return { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, tool, run };
 }
 
 test("plan_board_assignment exposes workspace kind, branch, path and session workspaceId for direct worktree assignment and owner reuse", async () => {
@@ -443,8 +444,28 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     content: { needsInput: expect.stringContaining("저작권") },
   });
 
-  // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
+  // Cannot clear an open question with arbitrary `withdrawn` while the conversation still asks for input!
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: e305.evidenceId,
+    kind: "idle",
+    text: "#305 철회",
+    receipt: { kind: "withdrawn", reason: "임의 철회" },
+  })).rejects.toThrow(/열린 질문과 같은 발췌|철회·취소 근거/);
+
   const w305 = agents.find(a => a.id === "w305")!;
+  w305.updatedAt = "2026-11-26T06:35:00Z";
+  timelines.get("w305")!.push("공식 CE/UL 안전문 원문을 확인해 주세요.");
+  const stillAsking305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stillAsking305.evidenceId,
+    kind: "idle",
+    text: "#305 철회",
+    receipt: { kind: "withdrawn", reason: "임의 철회" },
+  })).rejects.toThrow(/철회·취소 근거/);
+
+  // When the user withdraws the #305 stage-2 request, idle classification succeeds without demanding an integration commit receipt!
   w305.updatedAt = "2026-11-26T06:40:00Z";
   timelines.get("w305")!.push("사용자 요청 철회를 확인했습니다. 2단계 자료 대기 없이 대기합니다.");
   const withdrawn305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
@@ -457,8 +478,11 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
   expect(prefs.read().judgments.w305).toMatchObject({ kind: "idle", evidenceId: withdrawn305.evidenceId });
 });
 
-test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestry, and commit check rollup fail-closed", async () => {
+test("createOutcomeVerifier validates GitHub issue URL/stateReason, remote-only main ancestry, and non-skipped commit check rollup fail-closed", async () => {
   expect(summarizeCommitChecks([], [])).toBe("unavailable");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "skipped" }], [])).toBe("unavailable");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "neutral" }], [])).toBe("unavailable");
+  expect(summarizeCommitChecks([{ status: "completed", conclusion: "skipped" }, { status: "completed", conclusion: "success" }], [])).toBe("passed");
   expect(summarizeCommitChecks([{ status: "completed", conclusion: "success" }], [])).toBe("passed");
   expect(summarizeCommitChecks([{ status: "in_progress", conclusion: null }], [])).toBe("pending");
   expect(summarizeCommitChecks([{ status: "completed", conclusion: "failure" }], [])).toBe("failed");
@@ -467,6 +491,9 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestr
   const calls: string[] = [];
   const verifier = createOutcomeVerifier(async (cmd, args) => {
     calls.push(`${cmd} ${args.join(" ")}`);
+    if (cmd === "git") {
+      throw new Error("local git branch must never substitute for remote main verification");
+    }
     if (cmd === "gh" && args[0] === "issue" && args[2] === "308") {
       return JSON.stringify({
         state: "CLOSED",
@@ -475,7 +502,6 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestr
       });
     }
     if (cmd === "gh" && args[0] === "issue" && args[2] === "309") {
-      // Redirected to a PR URL or another repo -> must fail closed as UNKNOWN!
       return JSON.stringify({
         state: "CLOSED",
         stateReason: "COMPLETED",
@@ -494,6 +520,9 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestr
     if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/cf6f661000000000000000000000000000000000/status") {
       return JSON.stringify({ state: "success", statuses: [] });
     }
+    if (cmd === "gh" && args[1] === "repos/acme/easydocs/commits/deadbee") {
+      throw new Error("Not Found");
+    }
     throw new Error(`unexpected command: ${cmd} ${args.join(" ")}`);
   });
 
@@ -506,12 +535,82 @@ test("createOutcomeVerifier validates GitHub issue URL/stateReason, main ancestr
     state: "UNKNOWN",
     stateReason: "UNKNOWN",
   });
-  expect(await verifier.verifyMainCommit(undefined, "acme/easydocs", "cf6f661")).toEqual({
+  // Even when a local workspacePath is supplied, remote GitHub ancestry is verified (never bypassed by local git main).
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "deadbee")).toEqual({
+    onMain: false,
+    checks: "unavailable",
+  });
+  expect(await verifier.verifyMainCommit("/synthetic/EasyDocs", "acme/easydocs", "cf6f661")).toEqual({
     onMain: true,
     resolvedSha: "cf6f661000000000000000000000000000000000",
     checks: "passed",
   });
-  expect(calls.length).toBeGreaterThanOrEqual(6);
+  expect(calls.every(c => c.startsWith("gh "))).toBe(true);
+});
+
+test("classify_board_conversation rejects unanchored receipts and mid-verification TOCTOU (new report or remote change)", async () => {
+  let midVerifyAction: (() => void) | undefined;
+  const { prefs, notes, workspaces, agents, timelines, issueStates, commitStates, run } = await openIssueBoard({
+    onVerifyIssue: () => midVerifyAction?.(),
+  });
+  const w308 = agents.find(a => a.id === "w308")!;
+  issueStates.set("acme/easydocs#308", { state: "CLOSED", stateReason: "COMPLETED" });
+  commitStates.set("acme/easydocs@cf6f661", { onMain: true, resolvedSha: "cf6f661000000000000000000000000000000000", checks: "passed" });
+
+  const validReceipt = {
+    kind: "completed" as const,
+    repo: "acme/easydocs",
+    issue: 308,
+    commit: "cf6f661",
+    verifiedCommit: "cf6f661",
+    verification: { source: "ci" as const, status: "passed" as const, summary: "CI 통과" },
+    closeReason: "COMPLETED" as const,
+  };
+
+  // 1. Unanchored session (no issue number in title, workspaceTitle, previous judgment, note, or turns) rejects arbitrary #999 receipt!
+  w308.title = "사진 교체 구현";
+  workspaces[1].title = "EasyDocs 사진 교체 작업";
+  timelines.set("w308", ["통합과 검증을 마쳤습니다."]);
+  const unanchoredEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: unanchoredEv.evidenceId,
+    kind: "idle",
+    text: "완료",
+    receipt: { ...validReceipt, issue: 999 },
+  })).rejects.toThrow(/대상 이슈 번호를 확인할 수 없어/);
+
+  // Restore #308 anchor via title for TOCTOU tests.
+  w308.title = "#308 2열 사진 교체 · 구현";
+  workspaces[1].title = "EasyDocs #308 · 2열 사진 교체 구현";
+  const ev = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+
+  // 2. New report_to_board arriving during async verification MUST abort idle classification and NEVER be superseded!
+  midVerifyAction = () => {
+    recordReport(notes, "w308", { kind: "question", text: "검증 중 새 질문이 도착했습니다." }, "other-ev");
+  };
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/세션 보고가 바뀌었습니다/);
+  expect(prefs.read().supersededAgentNotes.w308).toBeUndefined();
+  expect(prefs.read().judgments.w308).toBeUndefined();
+
+  // 3. Workspace remoteUrl changing to another repository during async verification MUST abort idle classification!
+  midVerifyAction = () => {
+    workspaces[1].gitRuntime.remoteUrl = "https://github.com/other/EasyDocs.git";
+  };
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "idle",
+    text: "#308 완료",
+    receipt: validReceipt,
+  })).rejects.toThrow(/프로젝트 저장소 설정이 바뀌었습니다/);
+  expect(prefs.read().judgments.w308).toBeUndefined();
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {
