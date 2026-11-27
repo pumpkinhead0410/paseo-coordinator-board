@@ -168,6 +168,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 26차 `78c05d6` 지적 2건 반영)**:
   1. **대상 미확정(`issues: []`) 검증 대기의 후속 대화 우회 차단**: `verifyIdleClassification`에서 `previousVerificationTarget`이 존재하면 `issues`가 비어 있더라도 후속 대화의 이슈로 폴백하지 않고 자동 `idle` 전환을 fail-closed 거절(사람 `saveNote` 확인 경로)하도록 수정했습니다.
   2. **모든 `verificationTarget` 신규 생성 경로에 단일 대상 제한 일원화**: `review`뿐 아니라 활성 `agent-note` 등에서 `question`·추가 질문 설명 경로로 새 `verificationTarget`이 생성될 때도 복수 이슈(`issues.length > 1`) 저장을 동일하게 거절합니다.
+- **2026-11-27 (독립 의도 리뷰 27차 `82b9f85` 지적 2건 반영)**:
+  1. **활성 검증 보고와 충돌하는 `review` 입력 차단**: `verificationTarget` 고정 시 세션 제목·워크스페이스와 활성 검증 보고(`agent-note` / 기존 `review`)를 분류 입력(`input.text`)보다 우선하는 권위 앵커로 두고, 분류 입력이 기존 권위 대상(예: `#308`)과 다른 이슈(`#999`)를 제시하면 fail-closed 거절합니다.
+  2. **후속 단계 사용자 입력 대기(#305 2단계) 보존**: `completed`/`not_planned` 영수증 검증 전에 최신 발췌의 미해소 사용자 입력·결정 대기(`hasRemainingHumanNeed`, 별도 작업 문장 제외) 및 열린 질문과 동일 발췌 여부를 검사해, 1단계 완료 영수증으로 2단계 `question`·`needsInput`이 닫히지 않도록 fail-closed 차단했습니다.
 
 ## Acceptance criteria
 

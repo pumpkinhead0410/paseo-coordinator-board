@@ -430,7 +430,7 @@ test("#308 reproduction: structured receipt verification blocks unverified compl
 });
 
 test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human decision (including withdrawal) are handled cleanly", async () => {
-  const { prefs, agents, timelines, issueStates, run } = await openIssueBoard();
+  const { prefs, agents, timelines, issueStates, commitStates, run } = await openIssueBoard();
   const e303 = JSON.parse(await run("read_board_conversation", { sessionId: "w303" }));
 
   const receipt303 = {
@@ -517,6 +517,40 @@ test("#303 NOT_PLANNED (verified vs OPEN/wrong-issue) and #305 staged human deci
     text: "#305 철회",
     receipt: { kind: "withdrawn", targetEvidenceId: e305.evidenceId, reason: "임의 철회" },
   })).rejects.toThrow(/철회·취소 근거/);
+
+  // A valid stage-1 `completed` receipt MUST NOT close #305's open stage-2 human question while the latest excerpt still says stage-2 inputs are needed!
+  issueStates.set("acme/easydocs#305", {
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    closing: { status: "commit", sha: "305aaaa000000000000000000000000000000000" },
+  });
+  commitStates.set("acme/easydocs@305aaaa", {
+    onMain: true,
+    resolvedSha: "305aaaa000000000000000000000000000000000",
+    checks: "passed",
+  });
+  w305.updatedAt = "2026-11-26T06:36:00Z";
+  timelines.get("w305")!.push("#305 1단계 통합 커밋 305aaaa를 원격 main에 반영했습니다. 다만 2단계 공식 CE/UL 원문과 저작권 규칙은 여전히 필요합니다.");
+  const stage1Done305 = JSON.parse(await run("read_board_conversation", { sessionId: "w305" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w305",
+    evidenceId: stage1Done305.evidenceId,
+    kind: "idle",
+    text: "#305 1단계 완료",
+    receipt: {
+      kind: "completed",
+      repo: "acme/easydocs",
+      issue: 305,
+      commit: "305aaaa",
+      verifiedCommit: "305aaaa",
+      verification: { source: "ci", status: "passed", summary: "CI passed" },
+      closeReason: "COMPLETED",
+    },
+  })).rejects.toThrow(/사용자 입력·결정 대기/);
+  expect(prefs.read().judgments.w305).toMatchObject({
+    kind: "question",
+    content: { needsInput: expect.stringContaining("저작권") },
+  });
 
   // Checking whether the user withdrew ("철회 여부를 확인 중입니다") is also rejected fail-closed!
   w305.updatedAt = "2026-11-26T06:37:00Z";
@@ -1360,6 +1394,29 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     verificationPending: true,
     verificationTarget: { repo: "acme/easydocs", issues: [] },
   });
+
+  // 13. Conflicting `review` input (`#999 최종 검증 대기`) MUST NOT overwrite an active `#308` verification agent-note!
+  const wConflict = {
+    id: "w_conflict",
+    title: "활성 보고 세션",
+    status: "idle",
+    projectId: "easydocs",
+    workspaceId: "wks_office",
+    updatedAt: "2026-11-26T07:30:00Z",
+    pendingPermissions: [],
+    labels: { coordinatorBoardParent: "coord" },
+  };
+  agents.push(wConflict);
+  timelines.set("w_conflict", ["결과 확인을 기다립니다."]);
+  const conflictEv = JSON.parse(await run("read_board_conversation", { sessionId: "w_conflict" }));
+  expect(recordReport(notes, "w_conflict", { kind: "review", text: "#308 최종 검증 대기" }, conflictEv.evidenceId).isError).not.toBe(true);
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_conflict",
+    evidenceId: conflictEv.evidenceId,
+    kind: "review",
+    text: "#999 최종 검증 대기",
+  })).rejects.toThrow(/기존 세션·활성 검증 보고의 대상 이슈\(#308\)와 충돌/);
+  expect(prefs.read().judgments.w_conflict).toBeUndefined();
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

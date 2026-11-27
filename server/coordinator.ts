@@ -14,8 +14,20 @@ const verificationReviewContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에
 const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
 const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
 const separateTaskWithdrawalPattern = /(?:별도(?:의)?|별개(?:의)?|다른\s*(?:작업|요청|안건|이슈)|무관한|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
-const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요|남아|남았|대기)|(?:판단|결정|확인|승인|자료|응답)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요|남아\s*있|남았|대기\s*중)|\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining))\b/i;
+const remainingNeedPattern = /(?:여전히|아직|계속)\s*(?:필요|남아|남았|대기)|(?:판단|결정|확인|승인|자료|응답|규칙|원문|입력|답변)(?:은|이|가)?\s*(?:여전히|아직)?\s*(?:필요|남아\s*있|남았|대기\s*중|미확정|받지\s*못)|\b(?:still\s+(?:need|needs|required|pending|waiting)|decision\s+(?:still\s+)?(?:needed|required|remaining)|awaiting\s+(?:user|human|input|decision|assets?))\b/i;
 const stillAskingPattern = /[?？]\s*$|(?:알려\s*주세요|제공해\s*주세요|확인해\s*주세요|부탁드립니다|기다리겠습니다|기다립니다)\.?$/;
+
+function hasRemainingHumanNeed(lastText: string): boolean {
+  const sentences = lastText
+    .trim()
+    .split(/(?:\r?\n|(?<=[.!?。])\s+)/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return sentences.some(sentence => {
+    if (separateTaskWithdrawalPattern.test(sentence)) return false;
+    return remainingNeedPattern.test(sentence) || stillAskingPattern.test(sentence);
+  });
+}
 
 const genericTopicStopwords = new Set([
   "이슈", "사람", "확인", "요청", "질문", "대기", "진행", "위해", "제공", "알려", "주세요",
@@ -312,6 +324,20 @@ export async function verifyIdleClassification(
       return "최신 발췌에서 원래 요청의 확정된 철회·취소 근거를 확인할 수 없어 withdrawn으로 해제할 수 없습니다.";
     }
     return null;
+  }
+
+  if (hasRemainingHumanNeed(last.text)) {
+    return "최신 발췌에 아직 해소되지 않은 사용자 입력·결정 대기(후속 단계 질문)가 남아 있어 완료 영수증으로 idle 전환할 수 없습니다. 열린 질문(question)과 needsInput을 유지하세요.";
+  }
+  if (hasOpenQuestion) {
+    const priorQuestionEvidenceId = context.activeNoteKind === "question"
+      ? context.activeNoteEvidenceId
+      : context.previousKind === "question"
+        ? context.previousEvidenceId
+        : undefined;
+    if (priorQuestionEvidenceId && priorQuestionEvidenceId === latest.id) {
+      return "열린 질문과 같은 발췌에서는 완료 영수증으로 idle 전환할 수 없습니다. 질문 해소 이후 최신 발췌를 확인하세요.";
+    }
   }
 
   if (!context.expectedRepo) {
@@ -670,6 +696,14 @@ export function attachCoordinatorTools(
         if (nextVerificationPending) {
           const existingTarget = previousSameProject?.verificationTarget;
           if (existingTarget) {
+            if (
+              input.kind === "review" &&
+              inputIssues.size > 0 &&
+              existingTarget.issues.length > 0 &&
+              [...inputIssues].some(id => !existingTarget.issues.includes(id))
+            ) {
+              throw new Error(`검증 대기 입력의 이슈(${[...inputIssues].sort((a, b) => a - b).map(n => `#${n}`).join(", ")})가 기존 검증 대기의 대상 이슈(${existingTarget.issues.map(n => `#${n}`).join(", ")})와 충돌해 기록할 수 없습니다.`);
+            }
             nextVerificationTarget = {
               ...(existingTarget.repo ? { repo: existingTarget.repo } : {}),
               issues: [...existingTarget.issues],
@@ -684,14 +718,20 @@ export function attachCoordinatorTools(
             const priorVerificationTextIssues = extractAnchoredIssues(
               `${previousSameProject?.kind === "review" ? previousSameProject.text ?? "" : ""} ${liveActiveAgentNote && latestNote?.kind === "review" ? latestNote.text ?? "" : ""}`,
             );
-            const turnIssues = extractAnchoredIssues(latest.turns.map(t => t.text).join(" "));
-            const targetIssueSet = structural.size > 0
+            const authoritativeIssues = structural.size > 0
               ? structural
-              : reviewInputIssues.size > 0
-                ? reviewInputIssues
-                : priorVerificationTextIssues.size > 0
-                  ? priorVerificationTextIssues
-                  : turnIssues;
+              : priorVerificationTextIssues.size > 0
+                ? priorVerificationTextIssues
+                : undefined;
+            if (
+              authoritativeIssues &&
+              reviewInputIssues.size > 0 &&
+              [...reviewInputIssues].some(id => !authoritativeIssues.has(id))
+            ) {
+              throw new Error(`검증 대기 입력의 이슈(${[...reviewInputIssues].sort((a, b) => a - b).map(n => `#${n}`).join(", ")})가 기존 세션·활성 검증 보고의 대상 이슈(${[...authoritativeIssues].sort((a, b) => a - b).map(n => `#${n}`).join(", ")})와 충돌해 기록할 수 없습니다.`);
+            }
+            const turnIssues = extractAnchoredIssues(latest.turns.map(t => t.text).join(" "));
+            const targetIssueSet = authoritativeIssues ?? (reviewInputIssues.size > 0 ? reviewInputIssues : turnIssues);
             const issues = [...targetIssueSet].sort((a, b) => a - b).slice(0, 20);
             if (issues.length > 1) {
               throw new Error(`검증 대기 대상은 세션당 하나의 이슈만 고정할 수 있습니다(감지된 이슈: ${issues.map(n => `#${n}`).join(", ")}). 이슈별로 세션을 분리하거나 단일 대상 이슈만 명시해 기록하세요.`);
