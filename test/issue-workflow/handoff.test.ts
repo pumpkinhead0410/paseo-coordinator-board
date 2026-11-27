@@ -44,7 +44,7 @@ async function openIssueBoard() {
       name: "EasyDocs",
       workspaceKind: "local_checkout" as const,
       workspaceDirectory: "/synthetic/EasyDocs",
-      gitRuntime: { currentBranch: "main" },
+      gitRuntime: { currentBranch: "main", remoteUrl: "https://github.com/acme/EasyDocs.git" },
     },
     {
       id: "wks_308",
@@ -53,7 +53,7 @@ async function openIssueBoard() {
       name: "easydocs-308",
       workspaceKind: "worktree" as const,
       workspaceDirectory: "/synthetic/worktrees/easydocs-308",
-      gitRuntime: { currentBranch: "feat/two-col-photo-replace-308" },
+      gitRuntime: { currentBranch: "feat/two-col-photo-replace-308", remoteUrl: "https://github.com/acme/EasyDocs.git" },
     },
   ];
 
@@ -225,14 +225,16 @@ test("#308 reproduction: running session rejects stale classification with actio
   expect(prefs.read().judgments.w308.kind).toBe("review");
 
   // PR MERGED, reason-less GitHub CLOSED, generic "build completed", GitHub Actions COMPLETED,
-  // or another issue (#999) / unrelated repo closure is rejected.
-  for (const [ts, text] of [
-    ["2026-11-26T05:58:30Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub MERGED 확인."],
-    ["2026-11-26T05:58:45Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub CLOSED 확인."],
-    ["2026-11-26T05:58:50Z", "cf6f661 merged into main, tests passed, build completed."],
-    ["2026-11-26T05:58:52Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과·GitHub Actions 상태 COMPLETED 확인."],
-    ["2026-11-26T05:58:54Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999는 COMPLETED로 닫혔습니다."],
-    ["2026-11-26T05:58:56Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. other/unrelated#308 COMPLETED 확인."],
+  // another issue (#999), same-name foreign owner (other/EasyDocs#308), or foreign GitHub issue URL is rejected.
+  for (const [ts, text, inputText] of [
+    ["2026-11-26T05:58:30Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub MERGED 확인.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:45Z", "cf6f661 원격 main 반영·D155 최종검증 통과·GitHub CLOSED 확인.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:50Z", "cf6f661 merged into main, tests passed, build completed.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:52Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과·GitHub Actions 상태 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:54Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999는 COMPLETED로 닫혔습니다.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:56Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. other/EasyDocs#308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:57Z", "#308 cf6f661 원격 main 반영·D155 최종검증 통과. https://github.com/other/unrelated/issues/308 COMPLETED 확인.", "#308 cf6f661 원격 main 통합 완료"],
+    ["2026-11-26T05:58:58Z", "#999 cf6f661 원격 main 반영·D155 최종검증 통과. GitHub 이슈 #999 COMPLETED 확인.", "#999 통합 완료"],
   ] as const) {
     w308.updatedAt = ts;
     timelines.get("w308")!.push(text);
@@ -241,8 +243,8 @@ test("#308 reproduction: running session rejects stale classification with actio
       sessionId: "w308",
       evidenceId: noReasonExcerpt.evidenceId,
       kind: "idle",
-      text: "#308 cf6f661 원격 main 통합 완료",
-    })).rejects.toThrow(/완료 영수증·검증 근거/);
+      text: inputText,
+    })).rejects.toThrow(/완료 영수증·검증 근거|일치하지 않아/);
     expect(prefs.read().judgments.w308.kind).toBe("review");
   }
 
@@ -267,10 +269,10 @@ test("#308 reproduction: running session rejects stale classification with actio
   })).rejects.toThrow(/권한 응답 대기/);
   w308.pendingPermissions = [];
 
-  // 3. Worker finishes /done with integration receipt + same-sentence cleanup hold ("확인했고 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다")!
+  // 3. Worker finishes /done with integration receipt + same-sentence cleanup hold with modifier ("확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다")!
   w308.updatedAt = "2026-11-26T06:37:05Z";
   timelines.get("w308")!.push(
-    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub #308 COMPLETED 종료를 확인했고 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
+    "#308 마무리 점검과 정리 인계를 완료했습니다. cf6f661 원격 main 반영·D155 최종검증 통과·GitHub #308 COMPLETED 종료를 확인했지만 현재 작업 폴더는 사용 종료를 확인하지 못해 정리를 보류합니다.",
   );
 
   // Reusing the pre-integration evidenceId is rejected.

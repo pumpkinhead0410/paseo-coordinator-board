@@ -1,7 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { decisionSchema } from "./decision-actions";
-import { pullRequestViewSchema } from "./prs";
+import { pullRequestViewSchema, repositorySlug } from "./prs";
 import { trackedDecisionViewSchema } from "./tracked-decisions";
 import { factSchema } from "./board-facts";
 
@@ -17,6 +17,7 @@ const session = z.object({
   title: z.string(),
   projectId: z.string(),
   projectTitle: z.string(),
+  projectRepo: repositorySlug.optional(),
   workspaceId: z.string().optional(),
   workspaceTitle: z.string(),
   workspacePull: workspacePullSchema.optional(),
