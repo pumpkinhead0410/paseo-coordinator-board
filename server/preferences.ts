@@ -67,14 +67,18 @@ const storedCompletionReceipt = z.discriminatedUnion("kind", [
 ]);
 export type CompletionReceipt = z.infer<typeof completionReceipt>;
 
+export const reviewKindSchema = z.enum(["general", "verification"]);
 export const judgment = z.object({
   content: decisionFields.optional(),
   receipt: completionReceipt.optional(),
+  reviewKind: reviewKindSchema.optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });
 const storedJudgment = z.object({
   content: decisionFields.optional(),
   receipt: storedCompletionReceipt.optional(),
+  reviewKind: reviewKindSchema.optional(),
+  verificationPending: z.boolean().optional(),
   evidenceId: z.string(), kind: z.enum(["question", "review", "idle"]), text: z.string().trim().min(1).max(1200),
 });
 const coordinatorConfig = z.object({ provider: z.string(), thinkingOptionId: z.string().optional(), modeId: z.string().optional() });

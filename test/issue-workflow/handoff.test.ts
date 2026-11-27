@@ -994,13 +994,25 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     receipt: validReceipt,
   })).rejects.toThrow(/종료 커밋 정보를 확인할 수 없어/);
 
-  // 8. ANY prior `review` judgment (regardless of wording like "최종 점검 결과 대조 필요" and even without an active agent-note) MUST reject receipt-less `idle` and `withdrawn`!
+  // 8. ANY prior `review` judgment on an issue-anchored session (regardless of wording like "최종 점검 결과 대조 필요" and even without an active agent-note) MUST reject receipt-less `idle`, `withdrawn`, downgrade to `general`, AND intermediate `question -> withdrawn -> idle` bypass!
   await run("classify_board_conversation", {
     sessionId: "w308",
     evidenceId: ev.evidenceId,
     kind: "review",
     text: "최종 점검 결과 대조 필요",
   });
+  expect(prefs.read().judgments.w308).toMatchObject({
+    kind: "review",
+    reviewKind: "verification",
+    verificationPending: true,
+  });
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: ev.evidenceId,
+    kind: "review",
+    reviewKind: "general",
+    text: "일반 검토로 낮춤",
+  })).rejects.toThrow(/일반 검토\(reviewKind: 'general'\)로 낮출 수 없습니다/);
   w308.updatedAt = "2026-11-26T07:05:00Z";
   timelines.get("w308")!.push("#308 통합 결과의 검증 자료가 아직 도착하지 않았습니다.");
   const unverifiedReviewEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
@@ -1016,8 +1028,134 @@ test("classify_board_conversation rejects unanchored receipts and mid-verificati
     kind: "idle",
     text: "남은 일 없음",
     receipt: { kind: "withdrawn", targetEvidenceId: ev.evidenceId, reason: "검증 대기 철회" },
-  })).rejects.toThrow(/검증 대기\(review\)/);
+  })).rejects.toThrow(/미해결 통합·검증 대기/);
   expect(prefs.read().judgments.w308.kind).toBe("review");
+
+  // 8b. Recording an intermediate `question` ("검증 일정 문의") MUST preserve `verificationPending: true` so cancelling that inquiry cannot clear the unresolved review wait!
+  w308.updatedAt = "2026-11-26T07:06:00Z";
+  timelines.get("w308")!.push("검증 일정은 언제로 잡을까요?");
+  const inquiryEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: inquiryEv.evidenceId,
+    kind: "question",
+    text: "검증 일정 문의",
+    content: { question: "검증 일정이 언제인가요?", needsInput: "검증 일정" },
+  });
+  expect(prefs.read().judgments.w308).toMatchObject({
+    kind: "question",
+    verificationPending: true,
+  });
+  w308.updatedAt = "2026-11-26T07:07:00Z";
+  timelines.get("w308")!.push("검증 일정 문의는 취소됐습니다. 다만 검증 자료는 아직 도착하지 않았습니다.");
+  const inquiryCancelEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: inquiryCancelEv.evidenceId,
+    kind: "idle",
+    text: "일정 문의 취소",
+    receipt: { kind: "withdrawn", targetEvidenceId: inquiryEv.evidenceId, reason: "일정 문의 취소" },
+  })).rejects.toThrow(/미해결 통합·검증 대기/);
+  await expect(run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: inquiryCancelEv.evidenceId,
+    kind: "idle",
+    text: "남은 일 없음",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
+  expect(prefs.read().judgments.w308).toMatchObject({
+    kind: "question",
+    verificationPending: true,
+  });
+
+  // Once #308 actually lands with a verified GitHub closing commit and passing CI, `idle` succeeds and clears `verificationPending`!
+  issueStates.set("acme/easydocs#308", {
+    state: "CLOSED",
+    stateReason: "COMPLETED",
+    closing: { status: "commit", sha: "cf6f661000000000000000000000000000000000" },
+  });
+  w308.updatedAt = "2026-11-26T07:08:00Z";
+  timelines.get("w308")!.push("#308 cf6f661 원격 main 통합과 CI 통과를 마쳤습니다.");
+  const verifiedDoneEv = JSON.parse(await run("read_board_conversation", { sessionId: "w308" }));
+  await run("classify_board_conversation", {
+    sessionId: "w308",
+    evidenceId: verifiedDoneEv.evidenceId,
+    kind: "idle",
+    text: "#308 cf6f661 원격 main 통합·CI 통과·GitHub COMPLETED 확인.",
+    receipt: validReceipt,
+  });
+  expect(prefs.read().judgments.w308.kind).toBe("idle");
+  expect(prefs.read().judgments.w308.verificationPending).toBeUndefined();
+
+  // 9. Non-issue general review (e.g. meeting room booking time comparison) is classified `reviewKind: "general"` and clears to `idle` without requiring a GitHub receipt, while explicit `reviewKind: "verification"` still fails closed!
+  const wMeeting = {
+    id: "w_meeting",
+    title: "회의실 예약 확인",
+    status: "idle",
+    projectId: "easydocs",
+    workspaceId: "wks_office",
+    updatedAt: "2026-11-26T07:10:00Z",
+    pendingPermissions: [],
+    labels: { coordinatorBoardParent: "coord" },
+  };
+  // Use a non-issue workspace for the meeting-room check so no `#308` anchor leaks from workspaceTitle.
+  workspaces.push({
+    id: "wks_office",
+    projectId: "easydocs",
+    title: "office-schedule",
+    workspaceKind: "local_checkout",
+    workspaceDirectory: "/work/office",
+    gitRuntime: { currentBranch: "main", remoteUrl: "https://github.com/acme/EasyDocs.git" },
+  });
+  agents.push(wMeeting);
+  timelines.set("w_meeting", ["회의실 A와 B의 14:00 예약 시간을 대조해 주세요."]);
+  const meetingEv1 = JSON.parse(await run("read_board_conversation", { sessionId: "w_meeting" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_meeting",
+    evidenceId: meetingEv1.evidenceId,
+    kind: "review",
+    text: "회의실 예약 시간 대조 필요",
+  });
+  expect(prefs.read().judgments.w_meeting).toMatchObject({
+    kind: "review",
+    reviewKind: "general",
+  });
+  expect(prefs.read().judgments.w_meeting.verificationPending).toBeUndefined();
+  wMeeting.updatedAt = "2026-11-26T07:11:00Z";
+  timelines.get("w_meeting")!.push("회의실 예약 시간이 모두 일치하며 남은 일이 없습니다.");
+  const meetingEv2 = JSON.parse(await run("read_board_conversation", { sessionId: "w_meeting" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_meeting",
+    evidenceId: meetingEv2.evidenceId,
+    kind: "idle",
+    text: "회의실 예약 시간 일치 확인, 남은 일 없음",
+  });
+  expect(prefs.read().judgments.w_meeting.kind).toBe("idle");
+
+  // Explicit `reviewKind: "verification"` on a non-issue session still requires a receipt and persists across `question`!
+  wMeeting.updatedAt = "2026-11-26T07:12:00Z";
+  timelines.get("w_meeting")!.push("배포 전 결과 대조가 필요합니다.");
+  const explicitVerifyEv = JSON.parse(await run("read_board_conversation", { sessionId: "w_meeting" }));
+  await run("classify_board_conversation", {
+    sessionId: "w_meeting",
+    evidenceId: explicitVerifyEv.evidenceId,
+    kind: "review",
+    reviewKind: "verification",
+    text: "최종 점검 결과 대조 필요",
+  });
+  expect(prefs.read().judgments.w_meeting).toMatchObject({
+    kind: "review",
+    reviewKind: "verification",
+    verificationPending: true,
+  });
+  wMeeting.updatedAt = "2026-11-26T07:13:00Z";
+  timelines.get("w_meeting")!.push("확인이 끝났고 남은 일이 없습니다.");
+  const explicitVerifyEv2 = JSON.parse(await run("read_board_conversation", { sessionId: "w_meeting" }));
+  await expect(run("classify_board_conversation", {
+    sessionId: "w_meeting",
+    evidenceId: explicitVerifyEv2.evidenceId,
+    kind: "idle",
+    text: "남은 일 없음",
+  })).rejects.toThrow(/완료 영수증·검증 근거/);
 });
 
 test("charter, existing-session template, digest prompts, and board tool descriptions align on initial assignment and integration retrieval", async () => {

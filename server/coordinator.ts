@@ -10,6 +10,7 @@ import { isManagedCoordinator, judgment, PreferenceStore, type CompletionReceipt
 import { githubRepository } from "../shared/github-repository";
 
 const completionOrCloseClaimPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:통합|병합|머지|구현|검증|작업|이슈|#\d+)\s*(?:완료|반영|종료|종결)|\b(?:merged|integrated|completed|not_planned)\b|조사(?:를|는)?\s*중단/i;
+const verificationReviewContextPattern = /(?:원격\s*)?(?:main|master)\s*(?:에\s*)?(?:통합|반영|병합|머지|포함)|(?:최종\s*검증|통합\s*결과|통합\s*검증|커밋\s*검증|종료\s*사유|CI\s*(?:통과|체크|검증)|(?:통합|병합|머지|구현|검증|이슈|#\d+)\s*(?:완료|반영|종료|종결|대기)|\b(?:merged|integrated|completed|not_planned|ci\s+checks?|closing\s+commit|verification\s+pending)\b)/i;
 const withdrawalEvidencePattern = /(?:요청\s*철회(?:를|가|됨|됐|했|\s*확인)|철회(?:를\s*확인|가\s*확인|되었|됐|했|됨)|취소(?:를\s*확인|가\s*확인|되었|됐|했|됨)|더\s*이상\s*필요\s*없|\b(?:request\s+(?:was\s+)?(?:withdrawn|cancelled|canceled)|confirmed\s+(?:withdrawal|cancellation)|no\s+longer\s+needed)\b)/i;
 const tentativeOrNegatedWithdrawalPattern = /(?:여부(?:를|는|가)?|확인\s*중|조회\s*중|검토\s*중|기다(?:리|립|림)|대기\s*중|하지\s*못|하지\s*않|않았|아니|미확인|예정|\b(?:checking|pending|whether|not\s+(?:withdrawn|cancelled|canceled)|unconfirmed)\b)/i;
 const separateTaskWithdrawalPattern = /(?:별도(?:의)?|별개(?:의)?|다른\s*(?:작업|요청|안건|이슈)|무관한|\b(?:separate|unrelated|other)\s+(?:task|request|work|issue)\b)/i;
@@ -143,11 +144,59 @@ function sameCommitRef(a: string, b: string, resolvedSha?: string): boolean {
   return na === nb || na.startsWith(nb) || nb.startsWith(na);
 }
 
+function computeAnchoredIssues(
+  latest: Evidence,
+  context: {
+    sessionTitle?: string;
+    workspaceTitle?: string;
+    previousText?: string;
+    activeNoteText?: string;
+  },
+  includeLastTurn = false,
+): Set<number> {
+  const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
+  if (structuralIssues.size > 0) return structuralIssues;
+  const proseAnchorIssues = extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
+  if (proseAnchorIssues.size > 0) return proseAnchorIssues;
+  const turns = includeLastTurn ? latest.turns : latest.turns.slice(0, -1);
+  return extractAnchoredIssues(turns.map(turn => turn.text).join(" "));
+}
+
+function hasPriorVerificationWait(context: {
+  previousKind?: "question" | "review" | "idle";
+  previousReviewKind?: "general" | "verification";
+  previousVerificationPending?: boolean;
+  previousText?: string;
+  activeNoteKind?: "question" | "review" | "done" | "clear";
+  activeNoteText?: string;
+  hasActiveAgentNote: boolean;
+  hasAnchoredIssue: boolean;
+}): boolean {
+  if (context.previousVerificationPending) return true;
+  if (context.previousKind === "review") {
+    if (context.previousReviewKind === "verification") return true;
+    if (context.hasAnchoredIssue) return true;
+    if (context.previousReviewKind === undefined && verificationReviewContextPattern.test(context.previousText ?? "")) {
+      return true;
+    }
+  }
+  if (
+    context.hasActiveAgentNote &&
+    context.activeNoteKind === "review" &&
+    (context.hasAnchoredIssue || verificationReviewContextPattern.test(context.activeNoteText ?? ""))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export async function verifyIdleClassification(
   latest: Evidence,
   input: { text: string; receipt?: CompletionReceipt },
   context: {
     previousKind?: "question" | "review" | "idle";
+    previousReviewKind?: "general" | "verification";
+    previousVerificationPending?: boolean;
     previousEvidenceId?: string;
     previousText?: string;
     previousQuestion?: string;
@@ -168,21 +217,21 @@ export async function verifyIdleClassification(
   if (context.isClarificationReply) return null;
   const last = latest.turns.at(-1);
   const claimsCompletion = completionOrCloseClaimPattern.test(input.text);
-  const hasReviewWait =
-    context.previousKind === "review" ||
-    (context.hasActiveAgentNote && context.activeNoteKind === "review");
+  const anchoredIssues = computeAnchoredIssues(latest, context, false);
+  const hasAnchoredIssue = anchoredIssues.size > 0;
+  const hasVerificationWait = hasPriorVerificationWait({
+    previousKind: context.previousKind,
+    previousReviewKind: context.previousReviewKind,
+    previousVerificationPending: context.previousVerificationPending,
+    previousText: context.previousText,
+    activeNoteKind: context.activeNoteKind,
+    activeNoteText: context.activeNoteText,
+    hasActiveAgentNote: context.hasActiveAgentNote,
+    hasAnchoredIssue,
+  });
   const hasOpenQuestion =
     context.previousKind === "question" || (context.hasActiveAgentNote && context.activeNoteKind === "question");
-  const requiresReceipt = !!input.receipt || hasReviewWait || context.hasActiveAgentNote || claimsCompletion;
-
-  const structuralIssues = extractAnchoredIssues(`${context.sessionTitle ?? ""} ${context.workspaceTitle ?? ""}`);
-  const proseAnchorIssues = extractAnchoredIssues(`${context.previousText ?? ""} ${context.activeNoteText ?? ""}`);
-  const priorTurnIssues = extractAnchoredIssues(latest.turns.slice(0, -1).map(turn => turn.text).join(" "));
-  const anchoredIssues = structuralIssues.size > 0
-    ? structuralIssues
-    : proseAnchorIssues.size > 0
-      ? proseAnchorIssues
-      : priorTurnIssues;
+  const requiresReceipt = !!input.receipt || hasVerificationWait || claimsCompletion;
 
   const openQuestionText = [
     context.activeNoteKind === "question" ? context.activeNoteText ?? "" : "",
@@ -191,7 +240,7 @@ export async function verifyIdleClassification(
     context.previousKind === "question" ? context.previousNeedsInput ?? "" : "",
   ].join(" ");
 
-  if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasReviewWait && !claimsCompletion) {
+  if (hasOpenQuestion && (!input.receipt || input.receipt.kind === "withdrawn") && !hasVerificationWait && !claimsCompletion) {
     if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
       return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
     }
@@ -218,7 +267,14 @@ export async function verifyIdleClassification(
     return null;
   }
 
-  if (!requiresReceipt) return null;
+  if (!requiresReceipt) {
+    if (context.previousKind === "review" || (context.hasActiveAgentNote && context.activeNoteKind === "review")) {
+      if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
+        return "최신 발췌를 확인할 수 없어 일반 검토 대기를 idle로 해제할 수 없습니다.";
+      }
+    }
+    return null;
+  }
 
   if (latest.laterInput || !last || last.role !== "assistant" || last.truncated) {
     return "최신 완료·종결 발췌를 확인할 수 없어 idle로 분류할 수 없습니다.";
@@ -230,8 +286,8 @@ export async function verifyIdleClassification(
   }
 
   if (receipt.kind === "withdrawn") {
-    if (hasReviewWait || claimsCompletion) {
-      return "검증 대기(review)나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
+    if (hasVerificationWait || claimsCompletion) {
+      return "미해결 통합·검증 대기(review)나 완료·NOT_PLANNED 종결 안건은 withdrawn으로 해제할 수 없습니다. 질문이 철회됐더라도 검증 대기는 review로 유지하고, 실제 완료 또는 NOT_PLANNED 영수증(receipt)을 확인하세요.";
     }
     if (context.hasActiveAgentNote && context.activeNoteEvidenceId && receipt.targetEvidenceId !== context.activeNoteEvidenceId) {
       return `철회 영수증의 targetEvidenceId(${receipt.targetEvidenceId})가 열린 보고의 근거(${context.activeNoteEvidenceId})와 일치하지 않아 withdrawn으로 해제할 수 없습니다.`;
@@ -359,7 +415,14 @@ export function attachCoordinatorTools(
             id: r.id, projectId: r.projectId, sourceProjectId: r.sourceProjectId, project: r.projectTitle,
             ...(r.workspaceId ? { workspaceId: r.workspaceId } : {}), workspaceTitle: r.workspaceTitle, title: r.title,
             status: r.status, activityAt: r.activityAt,
-            ...(matchedJudgment ? { judgment: { kind: matchedJudgment.kind, evidenceId: matchedJudgment.evidenceId } } : {}),
+            ...(matchedJudgment ? {
+              judgment: {
+                kind: matchedJudgment.kind,
+                evidenceId: matchedJudgment.evidenceId,
+                ...(matchedJudgment.reviewKind ? { reviewKind: matchedJudgment.reviewKind } : {}),
+                ...(matchedJudgment.verificationPending ? { verificationPending: true } : {}),
+              },
+            } : {}),
             ...(activeNote && activeNote.kind !== "clear" && !noteSuperseded ? { note: { kind: activeNote.kind, origin: activeNote.origin ?? "person", revision: activeNote.revision, ...(activeNote.evidenceId ? { evidenceId: activeNote.evidenceId } : {}) } } : {}),
             ...(needsRecommendation ? { needsRecommendation: true } : {}),
             ...(current.factCycle?.coordinator === agent.id && current.factCycle.expires > Date.now() && current.factCycle.candidates[r.id] ? { factCandidate: true } : {}),
@@ -380,9 +443,12 @@ export function attachCoordinatorTools(
   });
   const write = defineAgentTool({
     name: "classify_board_conversation",
-    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify, idle when no action is due. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
+    description: "Classify the cited conversation: question for a specific human action, review for evidence to verify (reviewKind: 'verification' for integration/issue verification waits, 'general' for non-issue reviews), idle when no action is due. Unresolved verification waits persist across intermediate question judgments until cleared with a verified receipt. Before marking integrated work or NOT_PLANNED closures idle, pass a structured receipt: {kind:'completed', repo, issue, commit, verifiedCommit, verification:{source:'ci', status:'passed', summary}, closeReason:'COMPLETED', cleanupHandoff?} or {kind:'not_planned', repo, issue, closeReason:'NOT_PLANNED', stopReason, cleanupHandoff?} (use {kind:'withdrawn', targetEvidenceId, targetNoteRevision?, reason} bound to the open question's evidenceId/revision only for non-integration request cancellation). The board verifies the target owner/repo#issue GitHub close reason, main ancestry, and GitHub commit checks fail-closed; never clear a pending verification wait without verified receipts (keep repos without passing CI checks in review for human verification). Separate product outcome from workspace cleanup handoff, and separate completed earlier phases from remaining human decisions (use content.needsInput when required inputs are missing). If classification fails because the session is running, wait until it returns to idle and reread the latest evidenceId to reclassify. For a human question, put one concise question in content.question, with content.recommendation + recommendationReason or content.needsInput. Writes a board judgment only. Never approves, completes work, or sends messages.",
     input: judgment.extend({ sessionId: z.string() }),
     async execute(input, { paseo, agent }) {
+      if (input.kind !== "review" && input.reviewKind !== undefined) {
+        throw new Error("reviewKind는 kind: 'review'일 때만 지정할 수 있습니다.");
+      }
       const rows = await managedRowsForCoordinator(paseo, prefs, agent.id);
       const row = rows.find(r => r.id === input.sessionId);
       if (!row) throw new Error("관리 대상 세션을 찾을 수 없습니다.");
@@ -409,6 +475,8 @@ export function attachCoordinatorTools(
       const beforeNoteRevision = currentNote?.revision;
       const beforeJudgmentEvidenceId = beforePreviousSameProject?.evidenceId;
       const beforeJudgmentKind = beforePreviousSameProject?.kind;
+      const beforeJudgmentReviewKind = beforePreviousSameProject?.reviewKind;
+      const beforeJudgmentVerificationPending = !!beforePreviousSameProject?.verificationPending;
 
       let verifiedExpectedRepo: string | undefined;
       let afterWorkspaceRepo: string | undefined;
@@ -423,6 +491,8 @@ export function attachCoordinatorTools(
           { text: input.text, receipt: input.receipt },
           {
             previousKind: beforePreviousSameProject?.kind,
+            previousReviewKind: beforePreviousSameProject?.reviewKind,
+            previousVerificationPending: beforePreviousSameProject?.verificationPending,
             previousEvidenceId: beforePreviousSameProject?.evidenceId,
             previousText: beforePreviousSameProject?.text,
             previousQuestion: beforePreviousSameProject?.content?.question,
@@ -479,11 +549,42 @@ export function attachCoordinatorTools(
         const previousSameProject = previous?.projectId === row.projectId ? previous : undefined;
         const isClarificationReply = !!latest.lastInputIds?.some(id => scope.clarifications?.[id]);
         const latestNote = notes?.visible(new Set([row.id]))[row.id];
+        const liveActiveAgentNote =
+          latestNote?.origin === "agent" &&
+          latestNote.kind !== "clear" &&
+          !isSupersededAgentNote({ id: row.id, projectId: row.projectId, evidenceId: input.evidenceId }, latestNote, scope);
+        const liveAnchoredIssues = computeAnchoredIssues(
+          latest,
+          {
+            sessionTitle: row.title,
+            workspaceTitle: row.workspaceTitle,
+            previousText: previousSameProject?.text,
+            activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
+          },
+          true,
+        );
+        const inputIssues = extractAnchoredIssues(input.text);
+        const hasLiveAnchoredIssue = liveAnchoredIssues.size > 0 || inputIssues.size > 0;
+        const liveHadVerificationWait = hasPriorVerificationWait({
+          previousKind: previousSameProject?.kind,
+          previousReviewKind: previousSameProject?.reviewKind,
+          previousVerificationPending: previousSameProject?.verificationPending,
+          previousText: previousSameProject?.text,
+          activeNoteKind: liveActiveAgentNote ? latestNote?.kind : undefined,
+          activeNoteText: liveActiveAgentNote ? latestNote?.text : undefined,
+          hasActiveAgentNote: !!liveActiveAgentNote,
+          hasAnchoredIssue: hasLiveAnchoredIssue,
+        });
         if (input.kind === "idle") {
           if (latestNote?.revision !== beforeNoteRevision) {
             throw new Error("분류 검증 중 세션 보고가 바뀌었습니다. 최신 상태를 다시 확인하세요.");
           }
-          if (previousSameProject?.evidenceId !== beforeJudgmentEvidenceId || previousSameProject?.kind !== beforeJudgmentKind) {
+          if (
+            previousSameProject?.evidenceId !== beforeJudgmentEvidenceId ||
+            previousSameProject?.kind !== beforeJudgmentKind ||
+            previousSameProject?.reviewKind !== beforeJudgmentReviewKind ||
+            !!previousSameProject?.verificationPending !== beforeJudgmentVerificationPending
+          ) {
             throw new Error("분류 검증 중 기존 판단이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
           }
           if (input.receipt?.kind === "completed" || input.receipt?.kind === "not_planned") {
@@ -498,6 +599,31 @@ export function attachCoordinatorTools(
               throw new Error("프로젝트 저장소 설정이 바뀌었습니다. 최신 상태를 다시 확인하세요.");
             }
           }
+        }
+        let resolvedReviewKind: "general" | "verification" | undefined;
+        let nextVerificationPending = false;
+        if (input.kind === "review") {
+          const isVerificationContext =
+            liveHadVerificationWait ||
+            hasLiveAnchoredIssue ||
+            verificationReviewContextPattern.test(input.text);
+          if (input.reviewKind === "general") {
+            if (liveHadVerificationWait) {
+              throw new Error("미해결 통합·검증 대기가 남아 있어 일반 검토(reviewKind: 'general')로 낮출 수 없습니다.");
+            }
+            if (isVerificationContext) {
+              throw new Error("이슈 또는 통합·검증 맥락이 연결된 세션은 일반 검토(reviewKind: 'general')로 기록할 수 없습니다.");
+            }
+            resolvedReviewKind = "general";
+            nextVerificationPending = false;
+          } else {
+            nextVerificationPending = input.reviewKind === "verification" || isVerificationContext;
+            resolvedReviewKind = nextVerificationPending ? "verification" : "general";
+          }
+        } else if (input.kind === "question") {
+          nextVerificationPending = liveHadVerificationWait;
+        } else if (input.kind === "idle" && isClarificationReply) {
+          nextVerificationPending = liveHadVerificationWait;
         }
         if (
           input.kind === "idle" &&
@@ -514,8 +640,11 @@ export function attachCoordinatorTools(
           };
         }
         const previousQuestion = previousSameProject?.kind === "question" && previousSameProject.evidenceId === input.evidenceId;
+        const parsedJudgment = judgment.parse(input);
         scope.judgments[row.id] = {
-          ...judgment.parse(input),
+          ...parsedJudgment,
+          ...(resolvedReviewKind ? { reviewKind: resolvedReviewKind } : {}),
+          ...(nextVerificationPending ? { verificationPending: true } : {}),
           projectId: row.projectId,
           ...(input.kind === "question" ? { requestedAt: previousQuestion ? previousSameProject.requestedAt : new Date().toISOString() } : {}),
         };

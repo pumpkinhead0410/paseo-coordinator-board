@@ -23,7 +23,7 @@ const plan = await plan_board_assignment({});
 // 2. 통합·다이제스트 시 잔존 판단·카드 기록 식별과 상태별 실패 처리
 const rows = await read_board_conversation({});
 // rows[i]: { id, projectId, workspaceId, workspaceTitle, title, status, activityAt,
-//            judgment?: { kind: "review", evidenceId: "..." },
+//            judgment?: { kind: "review", reviewKind?: "verification" | "general", verificationPending?: true, evidenceId: "..." },
 //            note?: { kind: "review", origin: "agent", revision: 1, evidenceId: "..." } }
 
 // 실행 중인 세션에 classify_board_conversation을 호출하면 재시도 지침이 포함된 오류를 반환
@@ -157,6 +157,9 @@ await classify_board_conversation({
 - **2026-11-27 (독립 의도 리뷰 22차 `363e5fa` 지적 2건 반영)**:
   1. `server/coordinator.ts`에서 `previousKind === "review"`의 문구 매칭 필터(`integrationReviewContextPattern`)를 제거해, 기존 판단이 어떤 문구의 `review` 대기이든(예: “최종 점검 결과 대조 필요”) 활성 작업자 보고 유무나 입력 문구(“남은 일 없음”)와 무관하게 영수증 없이 `idle`로 해제할 수 없도록 fail-closed 일원화했습니다.
   2. 이 문서의 Usage `#308` 예제를 현재 도구 계약에 맞춰 필수 완료 `receipt`와 CI 미확인 시 사람 확인(`review` 유지 → `saveNote`) 경로까지 함께 명시하도록 동기화했습니다.
+- **2026-11-27 (독립 의도 리뷰 23차 `ee7f8d7` 지적 2건 반영)**:
+  1. **미해결 검증 대기의 질문 경유 보존(`verificationPending`)**: `server/preferences.ts`의 저장 판단에 서버 관리 플래그 `verificationPending?: boolean`을 추가하고 `server/coordinator.ts`에서 `review`→`question`(및 추가 질문 설명 `idle`) 전환 시에도 미해결 통합·검증 대기를 보존하도록 수정했습니다. 이로써 `review → question → withdrawn → idle` 경유로 영수증 검사를 우회할 수 없고, `reviewKind: "general"`로의 강등도 차단됩니다.
+  2. **일반 검토(`general`)와 통합·검증 대기(`verification`)의 명시적 구분(`reviewKind`)**: `classify_board_conversation`의 `review` 판단에 선택 필드 `reviewKind: "general" | "verification"`을 도입했습니다. 이슈가 연결되거나(`anchoredIssues`) 통합·검증 맥락이 있는 세션의 `review`는 자동으로 `verification`(`verificationPending: true`)으로 기록되고 `general` 강등이 거절되는 반면, 이슈·통합과 무관한 일반 검토(예: 회의실 예약 시간 대조)는 `general`로 구분돼 최신 발췌 확인만으로 GitHub 영수증 없이 `idle` 해제가 가능합니다.
 
 ## Acceptance criteria
 
